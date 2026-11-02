@@ -1,0 +1,213 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:1800px;height:1060px;overflow:hidden;font-family:'Inter','Liberation Sans',sans-serif;font-size:14px;color:#111;background:var(--page)}
+.top{height:54px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--rule);background:var(--bar)}
+.top .brand{font-weight:800;font-size:17px;letter-spacing:.5px;margin-right:12px}
+.btn{border:1px solid var(--rule);padding:6px 12px;background:#fff;font-size:13px}
+.btn.on{background:var(--on-bg);color:var(--on-fg);border-color:var(--on-bd);font-weight:600}
+.quick{flex:1;border:1px solid var(--rule);height:34px;background:#fff;color:#777;padding:8px 12px;font-size:13px}
+.wrap{display:flex;height:1006px}
+.panel{width:330px;flex:none;border-right:1px solid var(--rule);background:var(--panel);display:flex;flex-direction:column}
+.panel .sec{border-bottom:1px solid var(--rule);padding:10px 14px}
+.panel .grow{flex:1}
+.panel label{display:block;font-size:10px;letter-spacing:1.4px;font-weight:700;color:var(--label);margin-bottom:6px;font-family:'DejaVu Sans Condensed','DejaVu Sans',sans-serif}
+.panel label small{font-weight:400;letter-spacing:0;text-transform:none;color:#888;margin-left:6px}
+.panel .row{font-size:14px;line-height:1.35;padding:3px 0;color:#222}
+.panel .row i{color:#888;font-style:normal;font-size:12px;margin-left:6px}
+.panel .status{color:var(--maroon);font-weight:800;font-size:15px;letter-spacing:.3px;text-transform:uppercase}
+.logo{padding:16px 14px 12px;border-bottom:2px solid var(--rule-heavy)}
+.logo .pci{display:block;font-weight:900;font-size:26px;letter-spacing:1px;font-family:'Inter Display','Inter',sans-serif;color:var(--maroon)}
+.logo small{display:block;font-size:10px;letter-spacing:1.5px;color:#555;margin-top:2px}
+.leg{font-size:12px;padding:2px 0;display:flex;align-items:center;gap:8px}
+.sw{width:26px;height:12px;border:1px solid #111;display:inline-block}
+.sheet .big{font-family:'Inter Display','Inter',sans-serif;font-weight:900;font-size:56px;line-height:.9;letter-spacing:-1px;color:#111}
+.sheet .sub{display:block;font-size:10px;color:#777;margin-top:8px;letter-spacing:1px}
+.sym{display:inline-block;width:16px;font-weight:800}
+.sym.u{color:var(--urg-fg)} .sym.h{color:var(--high-fg)}
+.cal{flex:1;display:flex;flex-direction:column;background:var(--paper)}
+.calhd{display:flex;align-items:center;gap:12px;padding:10px 18px;border-bottom:1px solid var(--rule)}
+.calhd .mo{font-family:'Inter Display','Inter',sans-serif;font-weight:900;font-size:28px;letter-spacing:-.5px}
+.calhd .arr{border:1px solid var(--rule-heavy);width:30px;height:30px;text-align:center;line-height:28px;font-weight:700}
+.calhd .today-btn{border:2px solid var(--today);padding:5px 14px;font-weight:700;font-size:13px;background:#fff;color:#111}
+.dow{display:grid;grid-template-columns:repeat(7,1fr);border-bottom:2px solid var(--rule-heavy)}
+.dow div{padding:7px 10px;font-size:11px;font-weight:800;letter-spacing:1.5px;text-align:center;color:#333}
+.dow .is{color:var(--today)}
+.grid{display:grid;grid-template-columns:repeat(7,1fr);grid-template-rows:repeat(5,1fr);flex:1;gap:0;background:var(--gridline)}
+.cell{background:var(--cellbg);position:relative;padding:6px 8px;border:1px solid transparent;outline:0.5px solid var(--gridline)}
+.cell.wk{background:var(--wk)}
+.cell.oct{background:var(--other)} .cell.oct.wk{background:var(--other-wk)}
+.cell.past{background:var(--pastbg)}
+.cell .hd{display:flex;align-items:baseline;gap:6px;margin-bottom:5px}
+.cell .num{font-weight:700;font-size:13px}
+.cell.past .num{color:#999}
+.cell .hrs{margin-left:auto;font-size:10px;color:#777}
+.tt{font-size:9px;letter-spacing:1.5px;font-weight:800;color:var(--today)}
+.cell.today{background:#fff;outline:3px solid var(--today);z-index:2}
+.done{position:absolute;right:6px;bottom:5px;font-size:9px;letter-spacing:1.5px;border:1px solid #999;color:#999;padding:1px 5px;transform:rotate(-6deg)}
+.chip{font-size:12px;line-height:1.2;padding:3px 6px;margin:3px 0;border:1px solid;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#fff;color:#111}
+.chip .sym{width:14px;font-size:11px}
+.chip.inv{border-style:dashed;color:#888;border-color:#aaa}
+.chip.hol,.chip.plan{border-style:dashed;color:#555;border-color:#777;background:transparent}
+:root{--page:#f3f3f1;--bar:#fff;--panel:#fff;--paper:#fff;--rule:#222;--rule-heavy:#222;--gridline:#2a4a8a;--cellbg:#fff;
+  --wk:#d9bb90;--other:#dcdfe1;--other-wk:#c8bba4;--pastbg:#dcdfe1;--label:#8c1d2f;--maroon:#8c1d2f;--today:#d8222a;
+  --on-bg:#fff;--on-fg:#111;--on-bd:#111;--urg-fg:#d8222a;--high-fg:#111}
+  .wrap{padding:22px;gap:22px}
+  .panel,.cal{border:3px solid #222;outline:0}
+  .cell{outline:0.75px solid #2a4a8a}
+  .chip{border-color:#222;border-radius:3px;box-shadow:2px 2px 0 rgba(0,0,0,.28)}
+  .chip.urg{background:#d8222a;color:#fff;border-color:#d8222a;font-weight:700}
+  .chip.high{background:#d9bb90}
+  .chip.low{border-style:dashed;border-color:#777;color:#555;box-shadow:none}
+  .chip.inv,.chip.plan,.chip.hol{box-shadow:none}
+  .sw{border-radius:3px}.sw.urg{background:#d8222a;border-color:#d8222a}.sw.high{background:#d9bb90}.sw.low{border-style:dashed}.sw.plan{border-style:dashed}
+  .dow{border-bottom:3px double #222}
+  .sheet .big{font-size:64px}
+  .cell.past .chip{opacity:.7}
+  .chip.meet{background:#c9ccce;color:#111;border-color:#222} .sw.meet{background:#c9ccce}
+  .btn{border-radius:4px} .quick{border-radius:4px} .calhd .arr,.calhd .today-btn{border-radius:4px}
+  .cell.past .done{color:#d8222a}
+  .calhd{background:#fff;border-bottom:1px solid #222}
+  .panel,.cal{border-radius:12px;overflow:hidden}
+  .grid{gap:5px;padding:5px;background:#fff}
+  .cell{outline:0;border:1px solid #2a4a8a;border-radius:7px}
+  .cell.past,.cell.oct.past{background-color:#dfe4cf;border:1.5px dashed #8a9a6a;border-radius:7px}
+  .cell.past.wk,.cell.oct.wk.past{background-color:#cdd4b4}
+  .cell.wk{background:#e2cfae} .cell.oct.wk{background:#d6c09a}
+  .cell.today{outline:0;border:3px dashed #d8222a}
+  .cell.mstart{border-top:7px solid #222} .cell.nov.n1{border-left:7px solid #222}
+  .cell.past .num{color:#444}
+  .panel{background:#f0f0ec}
+  .panel .sec{border:1px solid #222;border-radius:8px;margin:7px 10px;padding:0 0 8px;background:#fff;overflow:hidden;box-shadow:1px 1px 0 rgba(0,0,0,.18)}
+  .panel .sec:not(.grow){flex:none}
+  .panel label{background:#dfe4cf;margin:0 0 8px;padding:7px 12px;color:#222;border-bottom:1px solid #222}
+  .panel .sec>.row,.panel .sec>.leg,.panel .sec>.status{margin-left:12px;margin-right:12px}
+  .panel .row{border-bottom:1px dotted #999;padding:5px 0}
+  .panel .row:last-child{border-bottom:0}
+  .panel .grow{min-height:95px;flex:1 1 auto}
+  .ql{padding:8px 12px 4px;font-family:'Inter Display','Inter',sans-serif}
+  .ql .r{display:flex;align-items:baseline;gap:10px}
+  .ql .huge{font-weight:900;font-size:58px;line-height:.85;letter-spacing:-3px}
+  .ql .dowl{font-weight:800;font-size:24px;letter-spacing:2px;color:#8c1d2f}
+  .ql .yr{font-weight:900;font-size:28px;letter-spacing:-1px;line-height:1}
+  .ql .strip{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:7px}
+  .ql .box{border:1px solid #222;border-radius:5px;padding:3px 4px;text-align:center;background:#fff;box-shadow:1px 1px 0 rgba(0,0,0,.2)}
+  .ql .box b{display:block;font-size:15px;font-weight:900;line-height:1}
+  .ql .box small{display:block;font-size:9px;letter-spacing:1px;color:#555;margin-top:3px;font-family:'DejaVu Sans Condensed',sans-serif}
+  .ql .bar{height:10px;border:1px solid #222;border-radius:5px;margin-top:7px;background:#fff;position:relative;overflow:hidden}
+  .ql .bar i{position:absolute;left:0;top:0;bottom:0;background:#d6be9a;border-right:2px solid #222}
+  .ql .barlab{display:flex;justify-content:space-between;font-size:9px;letter-spacing:1px;color:#555;margin-top:3px}
+  .calhd{padding:12px 18px;background:#efe3cc;border-bottom:1.5px solid #222}
+  .calhd .arr,.calhd .today-btn{background:#fff;box-shadow:1px 1px 0 rgba(0,0,0,.2)}
+  .calhd .mo{border:1.5px solid #222;border-radius:6px;background:#fff;padding:2px 14px;box-shadow:1px 1px 0 rgba(0,0,0,.2)}
+  .top{background:#f0f0ec;border-bottom:1.5px solid #222;height:58px;gap:14px}
+  .seg{display:inline-flex;border:1.5px solid #222;border-radius:6px;overflow:hidden;box-shadow:1px 1px 0 rgba(0,0,0,.2);background:#fff}
+  .seg .btn{border:0;border-right:1px solid #222;border-radius:0;padding:7px 14px;background:#fff;box-shadow:none}
+  .seg .btn:last-child{border-right:0}
+  .seg .btn.on{background:#efe3cc;color:#111;font-weight:800}
+  .btn{border:1.5px solid #222;border-radius:6px;padding:7px 12px;box-shadow:1px 1px 0 rgba(0,0,0,.2)}
+  .quick{border:1.5px solid #222;border-radius:6px;height:36px;box-shadow:inset 1px 1px 0 rgba(0,0,0,.08)}
+  .grid{grid-template-rows:48px repeat(5,1fr);grid-template-columns:38px repeat(7,minmax(0,1fr));margin-right:18px}
+  .cell{min-width:0} .chip{min-width:0}
+  .grid .dh{border:1.5px solid #222;border-radius:6px;background:#dfe4cf;display:flex;align-items:center;justify-content:center;font-family:'Inter',sans-serif;font-weight:600;font-size:15px;letter-spacing:0;color:#222;box-shadow:0 3px 0 #222}
+  .grid .dh.wkd{background:#cdd4b4}
+  .grid .dh.is{background:#d8222a;color:#fff;border:1.5px solid #222;box-shadow:0 3px 0 #222,2px 2px 0 rgba(0,0,0,.25);margin:-4px -3px;font-size:16px;font-weight:700;z-index:3;position:relative}
+  .plate{display:inline-flex;align-items:center;gap:10px;border:1.5px solid #222;border-radius:6px;background:#fff;padding:5px 12px;box-shadow:1px 1px 0 rgba(0,0,0,.2);margin-right:6px;line-height:1.05}
+  .plate b{color:#8c1d2f;font-weight:900;font-size:15px;letter-spacing:.5px;font-family:'Inter Display','Inter',sans-serif;white-space:nowrap}
+  .plate .mono{display:inline-block;border:1.5px solid #8c1d2f;color:#8c1d2f;border-radius:4px;font-weight:900;font-size:12px;padding:3px 5px;letter-spacing:1px}
+  .when{margin-left:auto;font-size:11px;font-weight:700;color:#8c1d2f;padding-left:8px}
+  .panel .row.pr{display:flex;align-items:center;gap:6px}
+  .panel .row .arr{font-weight:900;width:16px} .panel .row.in .arr{color:#2a4a8a}
+  .panel .row .who{font-weight:700;margin-right:4px}
+  .cell{position:relative}
+  .capstrip{height:24px;font-size:11px;color:#555;padding:5px 18px;background:#f3f3f1;border-bottom:1px solid #ccc}
+  .wrap{height:978px}
+  .panel .sec{margin:4px 10px;padding-bottom:6px} .panel label{padding:5px 12px;margin-bottom:5px}
+  .panel .row{padding:4px 0}
+  .cell .hd{padding-right:26px}
+  .gut{border:1px solid #222;border-radius:6px;background:#f0f0ec;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'DejaVu Sans Condensed',sans-serif}
+  .gut span{font-size:8px;letter-spacing:1px;color:#666} .gut b{font-size:15px;font-weight:900;color:#222}
+  .gut.cur{background:#d8222a;border-color:#222} .gut.cur span,.gut.cur b{color:#fff}
+  .gut.hd0{font-size:10px;font-weight:800;letter-spacing:1px;color:#444;background:#dfe4cf}
+  .ddtab{position:absolute;top:-1px;right:-1px;background:#d8222a;color:#fff;font-size:9px;font-weight:900;letter-spacing:1px;padding:2px 7px;border:1.5px solid #222;border-radius:0 6px 0 6px;z-index:2}
+  .tl{margin:4px 0 8px}
+  .tlbar{position:relative;height:16px;border:1.5px solid #222;border-radius:4px;background:#fff;overflow:visible}
+  .tlbar .mtg{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(135deg,#c9ccce 0 4px,#fff 4px 7px);border-right:1px solid #222}
+  .tlbar .now{position:absolute;top:-5px;bottom:-5px;width:3px;background:#d8222a;border:1px solid #222;margin-left:-2px}
+  .tlticks{display:flex;justify-content:space-between;font-size:9px;color:#666;margin-top:3px;letter-spacing:.5px}
+  .tlnow{font-size:11px;color:#8c1d2f;letter-spacing:1px;margin-top:4px;font-weight:700}
+  .sec.focus{border:2px solid #222;background:#fff7f0}
+  .sec.focus label{background:#d8222a;color:#fff;border-bottom:1px solid #222}
+  .nx{display:flex;gap:12px;align-items:center;padding:4px 12px 2px}
+  .nxsym{font-size:34px;font-weight:900;color:#d8222a;font-family:'Inter Display','Inter',sans-serif}
+  .nxt b{display:block;font-size:19px;line-height:1.15} .nxt small{display:block;font-size:11px;color:#555;letter-spacing:1px;margin-top:3px}
+  .nxbtn{display:flex;gap:8px;padding:8px 12px 2px}
+  .nxbtn .btn{border:1.5px solid #222;border-radius:5px;padding:5px 10px;font-weight:700;font-size:12px;background:#fff;box-shadow:1px 1px 0 rgba(0,0,0,.2)}
+  .nxbtn .ok{background:#dfe4cf} .nxbtn .push{background:#efe3cc}
+  .cap{position:absolute;left:6px;right:6px;bottom:5px;height:7px;border:1px solid #222;border-radius:4px;background:#fff;overflow:hidden}
+  .cap i{display:block;height:100%;background:#d6be9a} .cap.over i{background:#d8222a}
+  .cell{padding-bottom:16px;overflow:visible}
+  .hleg{margin-left:auto;display:inline-flex;gap:6px}
+  .hl{font-size:11px;font-weight:600;border:1px solid #222;border-radius:4px;padding:3px 8px;background:#fff;box-shadow:1px 1px 0 rgba(0,0,0,.2)}
+  .hl.urg{background:#d8222a;color:#fff;border-color:#d8222a} .hl.high{background:#d9bb90} .hl.low,.hl.plan{border-style:dashed;box-shadow:none;color:#555} .hl.meet{background:#c9ccce}
+  .calhd .bal{margin-left:10px;background:#dfe4cf;border:1.5px solid #222;border-radius:6px;padding:6px 12px;font-weight:700;font-size:13px;box-shadow:1px 1px 0 rgba(0,0,0,.2)}
+  .cal{position:relative}
+  .sb{position:absolute;right:6px;top:150px;bottom:8px;width:13px;border:1.5px solid #222;border-radius:7px;background:#fff}
+  .sb i{position:absolute;left:1.5px;right:1.5px;top:19%;height:26%;background:#222;border-radius:5px}
+  .sb:before,.sb:after{content:'';position:absolute;left:3px;right:3px;height:0;border-top:1px solid #222}
+  .sb:before{top:5px} .sb:after{bottom:5px}
+  .chip.hov{position:relative;overflow:visible;box-shadow:0 0 0 2px #fff,0 0 0 3.5px #222,2px 2px 0 rgba(0,0,0,.3);z-index:4}
+  .chip.hov .mv{position:absolute;top:50%;width:20px;height:20px;margin-top:-10px;border:1.5px solid #222;border-radius:50%;background:#fff;color:#111;font-weight:900;font-size:13px;line-height:17px;text-align:center;box-shadow:1px 1px 0 rgba(0,0,0,.3)}
+  .chip.hov .mv.l{left:-12px} .chip.hov .mv.r{right:-12px}
+  .chip .q{position:absolute;top:-7px;right:-7px;width:16px;height:16px;border-radius:50%;background:#fff;border:1.5px solid #8c1d2f;color:#8c1d2f;font-size:11px;font-weight:900;line-height:13px;text-align:center;box-shadow:1px 1px 0 rgba(0,0,0,.25)}
+  .chip.unc{position:relative;overflow:visible;border-style:dashed}
+  .pop{position:absolute;left:8px;right:-110px;top:52px;background:#fff;border:1.5px solid #222;border-radius:7px;box-shadow:3px 3px 0 rgba(0,0,0,.3);padding:8px 10px;z-index:9;font-size:11px}
+  .pop b{display:block;font-size:11px;letter-spacing:1px;margin:2px 0 4px;color:#8c1d2f}
+  .pop .r{display:flex;gap:4px;margin-bottom:6px;align-items:center}
+  .pop .o{white-space:nowrap;border:1px solid #222;border-radius:4px;padding:3px 7px;background:#fff;font-weight:600}
+  .pop .o.on{background:#efe3cc;box-shadow:inset 0 0 0 1px #222}
+  .pop .r.pr .o{min-width:26px;text-align:center}
+  .pop .save{background:#222;color:#fff;border-color:#222;margin-left:auto}
+  .pop .ttl{font-size:10px;color:#555;margin-bottom:4px}
+</style></head><body>
+<div class="capstrip">Look v2 — reference mock (sample data). Spec: design/LOOK-v2.md</div>
+<div class="top"><span class="plate"><span class="mono">AP</span><b>PERSONAL ASSISTANT</b></span>
+  <span class="seg"><span class="btn">Work</span><span class="btn">Home</span><span class="btn on">Both</span></span>
+  <span class="seg"><span class="btn on">Month</span><span class="btn">Week</span><span class="btn">Day</span></span>
+  <span class="quick">+ &nbsp;Quick add or tell your assistant anything…</span>
+  <span class="btn" style="font-weight:700;padding:7px 14px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#d8222a" stroke-width="2" stroke-linecap="round" style="vertical-align:-2px;margin-right:6px"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg>Tell Assistant</span><span class="btn">Tomorrow</span><span class="btn">Mini</span><span class="btn">Full screen</span>
+</div>
+<div class="wrap"><aside class="panel">
+<div class="sec focus"><label>NEXT UP</label>
+  <div class="nx"><span class="nxsym">!!</span><div class="nxt"><b>Submit benefits form</b><small>1 h · urgent · drop-dead today</small></div></div>
+  <div class="nxbtn"><span class="btn ok">✓ Done</span><span class="btn push">Push →</span><span class="btn more">More…</span></div></div>
+<div class="sec"><label>STATUS</label><div class="status">ON TRACK · 2 AT RISK</div></div>
+<div class="sec"><label>TODAY · MON NOV 2</label><div class="tl"><div class="tlbar">
+  <i class="mtg" style="left:0;width:11.1%"></i><i class="mtg" style="left:11.1%;width:11.1%"></i>
+  <i class="now" style="left:38%"></i></div>
+  <div class="tlticks"><span>7a</span><span>8</span><span>9</span><span>10</span><span>11</span><span>12</span><span>1</span><span>2</span><span>3</span><span>4p</span></div>
+  <div class="tlnow">NOW 10:25 · <b>5 h 35 m</b> left</div></div><div class="row"><b>17 h</b> on an 8 h day — 2 items move</div><div class="row">First: <b>Submit benefits form</b></div></div>
+<div class="sec"><label>MEETINGS <small>from Outlook</small></label>
+  <div class="row">7a–8a &nbsp;Phase 1 Review <i>invited</i></div>
+  <div class="row">8a–9a &nbsp;Daily Review <i>invited</i></div></div>
+<div class="sec"><label>PROMISES</label>
+  <div class="row pr"><span class="arr">→</span><span class="who">You owe PM</span>bid hours<span class="when">Thu 12</span></div>
+  <div class="row pr"><span class="arr">→</span><span class="who">You owe field</span>DWG<span class="when">Fri 13</span></div>
+  <div class="row pr in"><span class="arr">←</span><span class="who">GC owes you</span>job schedule<span class="when">3 d</span></div></div>
+<div class="sec grow"><label>TASKS · 3</label>
+  <div class="row"><span class="sym u">!!</span>Submit benefits form</div>
+  <div class="row"><span class="sym h">▲</span>Job A: panel set</div>
+  <div class="row"><span class="sym h">▲</span>Job A: shop set rev</div></div>
+<div class="sec sheet"><label>QUICK LOOK</label><div class="ql"><div class="r"><span class="huge" style="font-size:78px">NOV</span><span class="huge" style="font-size:78px;color:#111">2</span></div>
+  <div class="r" style="justify-content:space-between;align-items:center;margin-top:8px"><span class="dowl" style="font-size:30px;letter-spacing:1px;background:#d8222a;color:#fff;padding:2px 10px;border-radius:5px;border:2px solid #222;box-shadow:2px 2px 0 rgba(0,0,0,.3)">MONDAY</span><span class="yr" style="font-size:34px">2026</span></div>
+  <div class="bar"><i style="width:84%"></i></div><div class="barlab"><span>WEEK 45 OF 52</span><span>7 LEFT</span></div>
+  <div class="strip"><div class="box"><b>306</b><small>DAY OF YR</small></div><div class="box"><b>59</b><small>DAYS LEFT</small></div><div class="box"><b>16</b><small>TO PTO</small></div></div></div></div>
+</aside>
+<main class="cal">
+<div class="calhd"><span class="arr">‹</span><span class="mo">November 2026</span><span class="arr">›</span><span class="today-btn">Today</span><span class="btn bal">⇄ Balance week</span><span class="hleg"><span class="hl urg">!! Urgent</span><span class="hl high">▲ High</span><span class="hl norm">● Normal</span><span class="hl low">– Low</span><span class="hl plan">◇ Planned</span><span class="hl meet">■ Meeting</span></span></div>
+<div class="grid" style="margin-top:6px"><div class="gut hd0">WK</div><div class="dh wkd">Sunday</div><div class="dh is">Monday</div><div class="dh">Tuesday</div><div class="dh">Wednesday</div><div class="dh">Thursday</div><div class="dh">Friday</div><div class="dh wkd">Saturday</div>
+<div class="gut"><span>WK</span><b>44</b></div><div class="cell oct wk past"><div class="hd"><span class="num">25</span><span class="hrs"></span></div><span class="done">DONE</span></div><div class="cell oct past"><div class="hd"><span class="num">26</span><span class="hrs"></span></div><span class="done">DONE</span></div><div class="cell oct past"><div class="hd"><span class="num">27</span><span class="hrs"></span></div><span class="done">DONE</span></div><div class="cell oct past"><div class="hd"><span class="num">28</span><span class="hrs"></span></div><span class="done">DONE</span></div><div class="cell oct past"><div class="hd"><span class="num">29</span><span class="hrs"></span></div><div class="chip meet"><span class="sym">■</span>9a BIM Coord</div><span class="done">DONE</span></div><div class="cell oct past"><div class="hd"><span class="num">30</span><span class="hrs"></span></div><div class="chip high"><span class="sym">▲</span>Bank errand</div><span class="done">DONE</span></div><div class="cell oct wk past"><div class="hd"><span class="num">31</span><span class="hrs"></span></div><div class="chip high"><span class="sym">▲</span>Yard project</div><span class="done">DONE</span></div>
+<div class="gut cur"><span>WK</span><b>45</b></div><div class="cell nov wk past mstart n1"><div class="hd"><span class="num">NOV 1</span><span class="hrs"></span></div><div class="chip high"><span class="sym">▲</span>Yard project</div><span class="done">DONE</span></div><div class="cell nov today mstart"><div class="hd"><span class="num">2</span><span class="tt">TODAY</span><span class="hrs">17 h/8</span></div><div class="chip urg"><span class="sym">!!</span>Submit benefits form</div><div class="chip high"><span class="sym">▲</span>Job A: panel set</div><div class="chip high hov"><span class="mv l">‹</span><span class="sym">▲</span>Job A: shop set rev<span class="mv r">›</span></div><div class="chip inv"><span class="sym">○</span>2 invited</div><div class="cap over"><i style="width:100%"></i></div></div><div class="cell nov mstart"><div class="hd"><span class="num">3</span><span class="hrs">8 h/8</span></div><div class="chip hol"><span class="sym">◇</span>Election Day</div><div class="chip high"><span class="sym">▲</span>Job B: ceilings</div><div class="chip inv"><span class="sym">○</span>2 invited</div><div class="cap"><i style="width:100%"></i></div></div><div class="cell nov mstart"><div class="hd"><span class="num">4</span><span class="hrs">1 h/8</span></div><div class="chip norm unc"><span class="sym">●</span>Return scanner<span class="q">?</span></div><div class="pop"><div class="ttl">I guessed these — fix them?</div><b>HOW LONG</b><div class="r"><span class="o">15 m</span><span class="o on">1 h</span><span class="o">½ day</span><span class="o">Full</span><span class="o" style="border-style:dashed;color:#555;min-width:52px">3 h</span></div><b>PRIORITY</b><div class="r pr"><span class="o">!!</span><span class="o">▲</span><span class="o on">●</span><span class="o">–</span><span class="o save">Save</span></div></div><div class="chip inv"><span class="sym">○</span>1 invited</div><div class="cap"><i style="width:12%"></i></div></div><div class="cell nov mstart"><div class="hd"><span class="num">5</span><span class="hrs">1 h/8</span></div><div class="chip meet"><span class="sym">■</span>9a BIM Coord</div><div class="chip inv"><span class="sym">○</span>1 invited</div><div class="cap"><i style="width:12%"></i></div></div><div class="cell nov mstart"><div class="hd"><span class="num">6</span><span class="hrs">4 h/8</span></div><div class="chip plan"><span class="sym">◇</span>Job C call prep</div><div class="cap"><i style="width:50%"></i></div></div><div class="cell nov wk mstart"><div class="hd"><span class="num">7</span><span class="hrs"></span></div><div class="chip norm"><span class="sym">●</span>Family paperwork</div></div>
+<div class="gut"><span>WK</span><b>46</b></div><div class="cell nov wk"><div class="hd"><span class="num">8</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">9</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">10</span><span class="hrs"></span></div><div class="chip low"><span class="sym">–</span>Title block notes</div></div><div class="cell nov"><div class="hd"><span class="num">11</span><span class="hrs"></span></div><div class="chip hol"><span class="sym">◇</span>Veterans Day</div></div><div class="cell nov"><span class="ddtab">DD</span><div class="hd"><span class="num">12</span><span class="hrs">3 h/8</span></div><div class="chip meet"><span class="sym">■</span>9a BIM Coord</div><div class="chip urg"><span class="sym">!!</span>Bid hours to PM</div><div class="cap"><i style="width:38%"></i></div></div><div class="cell nov"><div class="hd"><span class="num">13</span><span class="hrs">2 h/8</span></div><div class="chip norm unc"><span class="sym">●</span>Job D DWG to field<span class="q">?</span></div><div class="cap"><i style="width:25%"></i></div></div><div class="cell nov wk"><div class="hd"><span class="num">14</span><span class="hrs"></span></div></div>
+<div class="gut"><span>WK</span><b>47</b></div><div class="cell nov wk"><div class="hd"><span class="num">15</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">16</span><span class="hrs"></span></div></div><div class="cell nov"><span class="ddtab">DD</span><div class="hd"><span class="num">17</span><span class="hrs"></span></div><div class="chip urg"><span class="sym">!!</span>Everything due before PTO</div></div><div class="cell nov"><div class="hd"><span class="num">18</span><span class="hrs"></span></div><div class="chip hol"><span class="sym">◇</span>PTO — out</div></div><div class="cell nov"><div class="hd"><span class="num">19</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">20</span><span class="hrs"></span></div></div><div class="cell nov wk"><div class="hd"><span class="num">21</span><span class="hrs"></span></div></div>
+<div class="gut"><span>WK</span><b>48</b></div><div class="cell nov wk"><div class="hd"><span class="num">22</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">23</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">24</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">25</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">26</span><span class="hrs"></span></div></div><div class="cell nov"><div class="hd"><span class="num">27</span><span class="hrs"></span></div></div><div class="cell nov wk"><div class="hd"><span class="num">28</span><span class="hrs"></span></div></div></div><div class="sb"><i></i></div>
+</main></div></body></html>
