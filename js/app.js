@@ -161,6 +161,7 @@ const meetingsOn = (dISO) => showMeetings() ? state.meetings.filter((m) => m.day
 const timedOn = (dISO) => meetingsOn(dISO).filter((m) => !m.all_day);
 const allDayOn = (dISO) => meetingsOn(dISO).filter((m) => m.all_day);
 const isOff = (m) => m.all_day && OFF_SOURCES.has(m.source);
+const isHoliday = (m) => /holiday/i.test(m.source || "") || /holiday/i.test(m.title || "");
 const offOn = (dISO) => state.meetings.filter((m) => m.day === dISO && isOff(m));
 const isWeekend = (dISO) => { const d = fromISO(dISO).getDay(); return d === 0 || d === 6; };
 const dayCapacity = (dISO) => (isWeekend(dISO) || offOn(dISO).length) ? 0 : DAY_HRS;
@@ -229,7 +230,7 @@ async function setAttending(m, attending) {
 }
 function meetingLine(m, { compact = false } = {}) {
   const off = isOff(m);
-  const cls = "mtg " + (off ? "allday off" : m.all_day ? "allday" : m.attending ? "going" : "invited");
+  const cls = "mtg " + (off ? "allday off" + (isHoliday(m) ? " holiday" : "") : m.all_day ? "allday" : m.attending ? "going" : "invited");
   const mark = m.all_day ? "◇" : m.attending ? "■" : "◌";
   const when = m.all_day ? (off ? "Day off" : "All day") : `${fmtTime(m.start_at)}–${fmtTime(m.end_at)}`;
   const n = el("div", cls);
@@ -353,6 +354,55 @@ function chipFor(t) {
 let popEl = null;
 function closeQuickFix() { if (popEl) { popEl.remove(); popEl = null; } }
 document.addEventListener("click", (e) => { if (popEl && !popEl.contains(e.target)) closeQuickFix(); });
+// free-entry hours snap to the nearest size the calendar knows (15 m · 1 h · ½ day · full)
+const snapSize = (h) => (h <= 0.5 ? "15m" : h <= 2 ? "1h" : h <= 5 ? "half" : "full");
+// put a popover under its anchor, kept inside the window
+function placePop(p, anchor, w, h) {
+  const r = anchor.getBoundingClientRect();
+  const left = Math.max(8, Math.min(window.innerWidth - w - 10, r.left));
+  const top = r.bottom + 6 + h > window.innerHeight ? Math.max(8, r.top - h - 6) : r.bottom + 6;
+  p.style.left = left + "px"; p.style.top = top + "px";
+}
+
+// ---------- date picker popover: a real month to look at, click a day ----------
+function openDatePop(anchor, startISO, onPick) {
+  closeQuickFix();
+  const p = el("div", "pop datepop");
+  let cur = fromISO(startISO || todayISO()); cur = new Date(cur.getFullYear(), cur.getMonth(), 1);
+  const draw = () => {
+    p.innerHTML = "";
+    const head = el("div", "dp-head");
+    const prev = el("button", "btn sm", "‹"); prev.type = "button"; prev.title = "Previous month";
+    const next = el("button", "btn sm", "›"); next.type = "button"; next.title = "Next month";
+    prev.addEventListener("click", () => { cur = new Date(cur.getFullYear(), cur.getMonth() - 1, 1); draw(); });
+    next.addEventListener("click", () => { cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1); draw(); });
+    head.append(prev, el("b", "", cur.toLocaleDateString("en-US", { month: "long", year: "numeric" })), next);
+    p.append(head);
+    const grid = el("div", "dp-grid");
+    ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].forEach((d) => grid.append(el("span", "dp-dow", d)));
+    for (let i = 0; i < cur.getDay(); i++) grid.append(el("span", "dp-blank", ""));
+    const n = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate();
+    for (let d = 1; d <= n; d++) {
+      const dISO = iso(new Date(cur.getFullYear(), cur.getMonth(), d));
+      const off = offOn(dISO);
+      const b = el("button", "dp-day" + (dISO === todayISO() ? " today" : "") + (isWeekend(dISO) ? " wk" : "") + (off.length ? " off" : "") + (dISO === startISO ? " on" : "") + (dISO < todayISO() ? " past" : ""), String(d));
+      b.type = "button";
+      b.title = off.length ? off.map((m) => m.title).join(", ") : fmtLong(dISO);
+      b.addEventListener("click", () => { closeQuickFix(); onPick(dISO); });
+      grid.append(b);
+    }
+    p.append(grid);
+    const foot = el("div", "dp-foot");
+    const t = el("button", "btn sm", "Today"); t.type = "button"; t.addEventListener("click", () => { closeQuickFix(); onPick(todayISO()); });
+    foot.append(t, el("span", "hint", "hatched = day off · tan = weekend"));
+    p.append(foot);
+  };
+  draw();
+  p.addEventListener("click", (e) => e.stopPropagation());
+  document.body.append(p);
+  placePop(p, anchor, 312, 330);
+  popEl = p;
+}
 function openQuickFix(t, anchor) {
   closeQuickFix();
   const p = el("div", "pop");
@@ -381,7 +431,7 @@ function openQuickFix(t, anchor) {
     const h = Number(pick.hrs);
     // free-entry hours snap to the nearest bucket the calendar knows (15 m · 1 h · ½ day · full), noted in the task
     let size = pick.size, note = null;
-    if (pick.hrs && h > 0) { size = h <= 0.5 ? "15m" : h <= 2 ? "1h" : h <= 5 ? "half" : "full"; note = `Adam: ${h} h`; }
+    if (pick.hrs && h > 0) { size = snapSize(h); note = `Adam: ${h} h`; }
     const patch = { size, priority: pick.priority, confirmed: true };
     if (note) patch.notes = (t.notes ? t.notes + "\n" : "") + note;
     closeQuickFix();
@@ -390,10 +440,7 @@ function openQuickFix(t, anchor) {
   pris.append(save);
   p.addEventListener("click", (e) => e.stopPropagation());
   document.body.append(p);
-  const r = anchor.getBoundingClientRect();
-  const left = Math.max(8, Math.min(window.innerWidth - 310, r.left));
-  const top = r.bottom + 6 + 170 > window.innerHeight ? Math.max(8, r.top - 176) : r.bottom + 6;
-  p.style.left = left + "px"; p.style.top = top + "px";
+  placePop(p, anchor, 300, 170);
   popEl = p;
 }
 
@@ -898,7 +945,7 @@ function renderSkinny(r) {
     const offs = offOn(today);
     if (ms.length || offs.length) {
       const sM = card(r, "Meetings", { sub: "from Outlook" });
-      offs.forEach((m) => { const row = el("div", "row wrap"); row.innerHTML = `◇ <b>${esc(m.title)}</b><i>day off</i>`; sM.append(row); });
+      offs.forEach((m) => { const row = el("div", "row wrap" + (isHoliday(m) ? " holiday" : "")); row.innerHTML = `◇ <b>${esc(m.title)}</b><i>day off</i>`; sM.append(row); });
       ms.forEach((m) => {
         const row = el("div", "row link");
         row.innerHTML = `${m.attending ? "■" : "◌"} ${esc(fmtTime(m.start_at))}–${esc(fmtTime(m.end_at))} &nbsp;${esc(m.title)}<i>${m.attending ? "you go" : "invited"}</i>`;
@@ -1025,7 +1072,7 @@ function renderUnscheduledPanel(r) {
 
 // ---------- Add task panel: what · when · priority · how long · which calendar ----------
 function addPick() {
-  if (!state.addPick) state.addPick = { date: todayISO(), priority: "normal", size: "1h", sizeSet: false, bucket: null };
+  if (!state.addPick) state.addPick = { date: todayISO(), priority: "normal", size: "1h", sizeSet: false, hrs: "", bucket: null };
   return state.addPick;
 }
 function addBucket() { const k = addPick(); return k.bucket || (state.bucket === "both" ? "work" : state.bucket); }
@@ -1062,9 +1109,9 @@ function renderAddPanel(r) {
   const sD = card(r, "When", { sub: k.date ? fmtLong(k.date) : "Inbox (no date)" });
   const days = el("div", "picks");
   addDayChoices().forEach((c) => opt(days, c.label, k.date === c.date, () => { k.date = c.date; }));
-  const pickD = el("input", "o date"); pickD.type = "date"; pickD.title = "Pick any date";
-  pickD.value = k.date && !addDayChoices().some((c) => c.date === k.date) ? k.date : "";
-  pickD.addEventListener("change", () => { if (pickD.value) { k.date = pickD.value; render({ now: true }); } });
+  const custom = k.date && !addDayChoices().some((c) => c.date === k.date);
+  const pickD = el("button", "o date" + (custom ? " on" : ""), custom ? `▦ ${fmtShort(k.date)}` : "▦ Pick a date…"); pickD.type = "button"; pickD.title = "Opens a calendar — click any day";
+  pickD.addEventListener("click", (e) => { e.stopPropagation(); openDatePop(pickD, k.date, (d) => { k.date = d; render({ now: true }); }); });
   days.append(pickD);
   opt(days, "No date", !k.date, () => { k.date = null; }, "Goes to the Inbox; give it a day later");
   sD.append(days);
@@ -1076,9 +1123,12 @@ function renderAddPanel(r) {
   sP.append(pr);
 
   // HOW LONG
-  const sS = card(r, "How long", { sub: k.sizeSet ? SIZE[k.size] : "1 hr is my guess until you pick" });
+  const sS = card(r, "How long", { sub: k.hrs ? `${k.hrs} h — filed as ${SIZE[k.size]}` : k.sizeSet ? SIZE[k.size] : "1 hr is my guess until you pick or type it" });
   const sz = el("div", "picks");
-  [["15m", "15 m"], ["1h", "1 h"], ["half", "½ day"], ["full", "Full day"]].forEach(([v, txt]) => opt(sz, txt, k.sizeSet && k.size === v, () => { k.size = v; k.sizeSet = true; }));
+  [["15m", "15 m"], ["1h", "1 h"], ["half", "½ day"], ["full", "Full day"]].forEach(([v, txt]) => opt(sz, txt, k.sizeSet && !k.hrs && k.size === v, () => { k.size = v; k.sizeSet = true; k.hrs = ""; }));
+  const hrs = el("input", "hrs"); hrs.type = "number"; hrs.min = "0.25"; hrs.step = "0.25"; hrs.placeholder = "or type hrs"; hrs.title = "Type the hours (e.g. 2.5)"; hrs.value = k.hrs || "";
+  hrs.addEventListener("input", () => { const h = Number(hrs.value); if (hrs.value && h > 0) { k.hrs = hrs.value; k.size = snapSize(h); k.sizeSet = true; } else { k.hrs = ""; k.sizeSet = false; k.size = "1h"; } sS.querySelector(".lab small").textContent = k.hrs ? `${k.hrs} h — filed as ${SIZE[k.size]}` : "1 hr is my guess until you pick or type it"; sz.querySelectorAll(".o").forEach((x) => x.classList.remove("on")); });
+  sz.append(hrs);
   sS.append(sz);
 
   // CALENDAR
@@ -1096,7 +1146,7 @@ function renderAddPanel(r) {
   plan.addEventListener("click", () => {
     const v = lines(); if (!v.length) { toast("Type or say what to add first"); return; }
     const where = k.date ? `on ${fmtLong(k.date)} (${k.date})` : "in the inbox (no date yet)";
-    const size = k.sizeSet ? SIZE[k.size] : "1 hr (my guess — leave it unconfirmed)";
+    const size = k.hrs ? `${k.hrs} h` : k.sizeSet ? SIZE[k.size] : "1 hr (my guess — leave it unconfirmed)";
     state.addDraft = "";
     askBrain(`Add to my ${addBucket()} calendar ${where}: ${v.join("; ")}. Priority ${PRI[k.priority].label}, size ${size}.${k.date ? " Pencil them in as planned and reshuffle anything else on that day that no longer fits." : ""}`);
   });
@@ -1107,6 +1157,7 @@ function renderAddPanel(r) {
     for (const line of v) {
       const p = parseQuick(line);
       const row = { title: p.title, priority: p.priority !== "normal" ? p.priority : k.priority, bucket: p.bucket || addBucket(), scheduled_date: p.date || k.date, size: k.size, confirmed: k.sizeSet, planned: true, job: p.job, source: "add" };
+      if (k.hrs) row.notes = `Adam: ${k.hrs} h`;
       if (await insertTask(row)) n++;
     }
     state.addDraft = "";
@@ -1119,8 +1170,8 @@ function renderAddPanel(r) {
 
   if (k.date) {
     const existing = tasksOn(k.date);
-    const sE = card(r, `Already on ${fmtShort(k.date)}`, { sub: String(existing.length) });
-    if (!existing.length) sE.append(el("div", "empty", "Nothing yet."));
+    const sE = card(r, `Already booked that day — ${fmtShort(k.date)}`, { sub: `${existing.length} item${existing.length === 1 ? "" : "s"} · so you can see what you're stacking onto` });
+    if (!existing.length) sE.append(el("div", "empty", "Nothing yet — the day is open."));
     existing.forEach((t) => sE.append(itemCard(t)));
   }
 }
@@ -1566,7 +1617,7 @@ function wire() {
   });
   $("quick-add").addEventListener("submit", async (e) => { e.preventDefault(); const v = $("quick-input").value.trim(); if (!v) return; $("quick-input").value = ""; await quickAdd(v); });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { if (state.editId) { state.editId = null; render(); } else if (state.panel) closePanel(); }
+    if (e.key === "Escape") { if (popEl) closeQuickFix(); else if (state.editId) { state.editId = null; render(); } else if (state.panel) closePanel(); }
     if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") { e.preventDefault(); $("quick-input").focus(); }
   });
   initMic();
