@@ -5,6 +5,9 @@ AP Personal Assistant ("AP") is a personal organizer: a month-first calendar wit
 the repo. The owner's operating rulebook (how the assistant manages him) is private and lives
 in the Supabase table `fm_rules`, not here. (The `fm_` table prefix is historical and stays.)
 
+## Where
+- App: https://adampurdy101.github.io/ap-personal-assistant/ · Code: github.com/adampurdy101/ap-personal-assistant (renamed Nov 2, 2026; GitHub redirects the old links)
+
 ## Pieces
 | Piece | Does | Lives |
 |---|---|---|

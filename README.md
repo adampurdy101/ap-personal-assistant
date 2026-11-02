@@ -8,7 +8,7 @@ a Claude brain that files and reshuffles within the rules.
 Vanilla HTML/CSS/JS PWA on GitHub Pages. Data in Supabase (Row Level Security, owner only).
 No build step. Push to `main` and it deploys.
 
-- App: https://adampurdy101.github.io/foreman/
+- App: https://adampurdy101.github.io/ap-personal-assistant/
 - Technical notes: [AP.md](AP.md) · look spec: [design/LOOK-v2.md](design/LOOK-v2.md)
 
 ## Files

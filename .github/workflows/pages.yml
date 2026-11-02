@@ -1,3 +1,4 @@
+# AP Personal Assistant — push to main deploys the site to GitHub Pages
 name: Deploy to GitHub Pages
 on:
   push:
