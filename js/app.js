@@ -725,7 +725,7 @@ function renderBrainPanel(r) {
   if (brain.busy) box.append(el("div", "hint", "Working on it…"));
   if (voice.on && (voice.key === "brain" || voice.key === "quick")) {
     const live = el("div", "bubble you live"); live.id = "live-bubble";
-    live.append(el("div", "who", "You · listening — pause 10 s or press to send"), el("div", "txt", voiceText() || "…"));
+    live.append(el("div", "who", "You · listening — pause 6 s or press to send"), el("div", "txt", voiceText() || "…"));
     box.append(live);
   }
   r.append(box);
@@ -1226,7 +1226,7 @@ const MIC_SVG = '<svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="c
 // restarted under the hood whenever it gives up. It sends by itself after SILENCE_MS
 // of quiet once you've said something, or when you press again. Buttons only reflect
 // the state; the state lives here, so a panel redraw never loses a session.
-const SILENCE_MS = 10000;
+const SILENCE_MS = 6000;
 const IDLE_MS = 30000;
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const voice = { rec: null, on: false, key: null, finalText: "", interim: "", silence: null, stopTimer: null, restarts: 0 };
