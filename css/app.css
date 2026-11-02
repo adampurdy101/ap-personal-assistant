@@ -294,7 +294,8 @@ b, strong { font-weight: 700; }
 .item .head .caret { color: var(--ink-3); }
 .item .detail { margin-top: 8px; font-size: 13px; color: var(--ink-2); line-height: 1.6; }
 .item .detail b { color: var(--ink); font-weight: 600; }
-.item .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.item .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.item .actions + .actions { margin-top: 5px; }
 .status-pill { font-size: 12px; padding: 1px 6px; border: 1px solid var(--rule); border-radius: 4px; background: #fff; color: var(--ink-2); white-space: nowrap; }
 .status-pill.overdue { border-color: var(--red); color: var(--maroon); background: #fde3e3; font-weight: 700; }
 .status-pill.warn { border-color: var(--rule); background: var(--tan); color: var(--ink); }
@@ -339,6 +340,9 @@ b, strong { font-weight: 700; }
 .row.holiday { background: var(--holiday-bg, transparent); color: var(--holiday-ink, var(--ink)); border-radius: 4px; padding-left: 6px; }
 .sec .actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 12px 6px; }
 .item .actions .btn.edit { font-weight: 800; border-width: 1.5px; box-shadow: var(--chip-shadow); }
+.item .actions.r4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.item .actions.r2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; }
+.item .actions.r4 .btn, .item .actions.r2 .btn { white-space: nowrap; padding-left: 4px; padding-right: 4px; text-align: center; }
 .form label.check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .form label.check input { width: auto; }
 .brain { display: flex; flex-direction: column; gap: 8px; margin: 0 12px 10px; }

@@ -1211,19 +1211,26 @@ function itemCard(t) {
         + (t.notes ? `<br><b>Notes:</b> ${esc(t.notes)}` : "");
       card.append(d);
 
-      const a = el("div", "actions");
-      const btn = (label, fn, cls = "btn sm") => { const b = el("button", cls, label); b.addEventListener("click", fn); return b; };
-      if (t.status !== "done") a.append(btn("✓ Done", () => saveTask(t.id, { status: "done", done_at: new Date().toISOString() }), "btn sm olive"));
-      else a.append(btn("Reopen", () => saveTask(t.id, { status: "not_started", done_at: null })));
-      // Adam's order: Done · → Tomorrow · → +1 week · ✎ Edit · Delete (the situational ones sit between)
-      { const m = btn("→ Tomorrow", () => moveTask(t, iso(addDays(new Date(), 1)), "Moved to tomorrow from the panel")); m.title = "Move it to tomorrow"; a.append(m); }
-      { const m = btn("→ +1 week", () => moveTask(t, iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)), "Pushed a week from the panel")); m.title = "Move it a week later"; a.append(m); }
-      { const e = btn("✎ Edit", () => { state.editId = t.id; render(); }, "btn sm primary edit"); e.title = "Change anything on this item"; a.append(e); }
-      if (t.status === "not_started" || t.status === "waiting") a.append(btn("Working", () => saveTask(t.id, { status: "working" })));
-      if (t.planned) a.append(btn("Make it real", () => saveTask(t.id, { planned: false })));
-      if (!t.confirmed && t.status !== "done") { const q = btn("? Set est. time + priority", null, "btn sm"); q.addEventListener("click", () => openQuickFix(t, q)); a.append(q); }
-      a.append(btn("Delete", async () => { if (confirm(`Delete "${t.title}"?`)) await deleteTask(t.id); }, "btn sm danger"));
-      card.append(a);
+      const btn = (label, fn, cls = "btn sm") => { const b = el("button", cls, label); if (fn) b.addEventListener("click", fn); return b; };
+      // Adam's layout: row 1 = Done · → Tomorrow · → +1 week · ▦ Pick a day (4 across) · row 2 = ✎ Edit · Delete
+      const r1 = el("div", "actions r4");
+      if (t.status !== "done") r1.append(btn("✓ Done", () => saveTask(t.id, { status: "done", done_at: new Date().toISOString() }), "btn sm olive"));
+      else r1.append(btn("Reopen", () => saveTask(t.id, { status: "not_started", done_at: null })));
+      { const m = btn("→ Tomorrow", () => moveTask(t, iso(addDays(new Date(), 1)), "Moved to tomorrow from the panel")); m.title = "Move it to tomorrow"; r1.append(m); }
+      { const m = btn("→ +1 week", () => moveTask(t, iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)), "Pushed a week from the panel")); m.title = "Move it a week later"; r1.append(m); }
+      { const c = btn("▦ Pick a day"); c.title = "Opens a calendar — click the day to move it there";
+        c.addEventListener("click", (e) => { e.stopPropagation(); openDatePop(c, t.scheduled_date, (d) => moveTask(t, d, `Moved to ${fmtShort(d)} from the panel calendar`)); }); r1.append(c); }
+      card.append(r1);
+      const r2 = el("div", "actions r2");
+      { const e = btn("✎ Edit", () => { state.editId = t.id; render(); }, "btn sm primary edit"); e.title = "Change anything on this item"; r2.append(e); }
+      r2.append(btn("Delete", async () => { if (confirm(`Delete "${t.title}"?`)) await deleteTask(t.id); }, "btn sm danger"));
+      card.append(r2);
+      // only when they apply
+      const r3 = el("div", "actions");
+      if (t.status === "not_started" || t.status === "waiting") r3.append(btn("Working", () => saveTask(t.id, { status: "working" })));
+      if (t.planned) r3.append(btn("Make it real", () => saveTask(t.id, { planned: false })));
+      if (!t.confirmed && t.status !== "done") { const q = btn("? Set est. time + priority"); q.addEventListener("click", (e) => { e.stopPropagation(); openQuickFix(t, q); }); r3.append(q); }
+      if (r3.children.length) card.append(r3);
     }
   }
   return card;
