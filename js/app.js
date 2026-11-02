@@ -411,7 +411,7 @@ function openQuickFix(t, anchor) {
   const pick = { size: t.size || "1h", priority: t.priority, hrs: "" };
   p.innerHTML = `<div class="ttl">I guessed these for <b>${esc(t.title)}</b> — set them:</div>`;
   const mk = (label, cls) => { const h = el("span", "h", label); p.append(h); const r = el("div", "r " + cls); p.append(r); return r; };
-  const sizes = mk("HOW LONG", "sz");
+  const sizes = mk("EST. TIME", "sz");
   const szBtns = {};
   [["15m", "15 m"], ["1h", "1 h"], ["half", "½ day"], ["full", "Full"]].forEach(([v, txt]) => {
     const b = el("button", "o" + (pick.size === v && !pick.hrs ? " on" : ""), txt); b.type = "button";
@@ -1125,7 +1125,7 @@ function renderAddPanel(r) {
   sP.append(pr);
 
   // HOW LONG
-  const sS = card(r, "How long", { sub: k.hrs ? `${k.hrs} h — filed as ${SIZE[k.size]}` : k.sizeSet ? SIZE[k.size] : "1 hr is my guess until you pick or type it" });
+  const sS = card(r, "Estimated time", { sub: k.hrs ? `${k.hrs} h — filed as ${SIZE[k.size]}` : k.sizeSet ? SIZE[k.size] : "1 hr is my guess until you pick or type it" });
   const sz = el("div", "picks");
   [["15m", "15 m"], ["1h", "1 h"], ["half", "½ day"], ["full", "Full day"]].forEach(([v, txt]) => opt(sz, txt, k.sizeSet && !k.hrs && k.size === v, () => { k.size = v; k.sizeSet = true; k.hrs = ""; }));
   const hrs = el("input", "hrs"); hrs.type = "number"; hrs.min = "0.25"; hrs.step = "0.25"; hrs.placeholder = "or type hrs"; hrs.title = "Type the hours (e.g. 2.5)"; hrs.value = k.hrs || "";
@@ -1189,7 +1189,7 @@ function itemCard(t) {
   const st = el("span", `status-pill ${s.cls}`, s.text);
   const caret = el("span", "caret", state.openId === t.id ? "▴" : "▾");
   head.append(chip, title);
-  if (!t.confirmed && t.status !== "done") { const q = el("span", "status-pill q", "? size"); q.title = "Size and priority were guessed"; head.append(q); }
+  if (!t.confirmed && t.status !== "done") { const q = el("span", "status-pill q", "? est. time"); q.title = "Estimated time and priority were guessed by AP — open it to set them"; head.append(q); }
   head.append(st, caret);
   head.addEventListener("click", () => { state.openId = state.openId === t.id ? null : t.id; state.editId = null; render(); });
   card.append(head);
@@ -1200,7 +1200,7 @@ function itemCard(t) {
       const d = el("div", "detail");
       const bits = [];
       if (t.job) bits.push(`<b>Job:</b> ${esc(t.job)}`);
-      if (t.size) bits.push(`<b>Size:</b> ${esc(SIZE[t.size])}`);
+      if (t.size) bits.push(`<b>Est. time:</b> ${esc(SIZE[t.size])}${t.confirmed ? "" : " (AP's guess)"}`);
       bits.push(`<b>Calendar:</b> ${t.bucket === "home" ? "Home" : "Work"}`);
       d.innerHTML = bits.join(" · ") + "<br>"
         + `<b>Scheduled:</b> ${t.scheduled_date ? esc(fmtShort(t.scheduled_date)) : "—"} · `
@@ -1215,12 +1215,12 @@ function itemCard(t) {
       const btn = (label, fn, cls = "btn sm") => { const b = el("button", cls, label); b.addEventListener("click", fn); return b; };
       if (t.status !== "done") a.append(btn("✓ Done", () => saveTask(t.id, { status: "done", done_at: new Date().toISOString() }), "btn sm olive"));
       else a.append(btn("Reopen", () => saveTask(t.id, { status: "not_started", done_at: null })));
+      { const e = btn("✎ Edit", () => { state.editId = t.id; render(); }, "btn sm primary edit"); e.title = "Change anything on this item"; a.append(e); }
       if (t.status === "not_started" || t.status === "waiting") a.append(btn("Working", () => saveTask(t.id, { status: "working" })));
       if (t.planned) a.append(btn("Make it real", () => saveTask(t.id, { planned: false })));
-      if (!t.confirmed && t.status !== "done") { const q = btn("? Set size + priority", null, "btn sm"); q.addEventListener("click", () => openQuickFix(t, q)); a.append(q); }
-      a.append(btn("Tomorrow", () => moveTask(t, iso(addDays(new Date(), 1)), "Moved to tomorrow from the panel")));
-      a.append(btn("+1 wk", () => moveTask(t, iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)), "Pushed a week from the panel")));
-      a.append(btn("Edit", () => { state.editId = t.id; render(); }));
+      if (!t.confirmed && t.status !== "done") { const q = btn("? Set est. time + priority", null, "btn sm"); q.addEventListener("click", () => openQuickFix(t, q)); a.append(q); }
+      { const m = btn("→ Tomorrow", () => moveTask(t, iso(addDays(new Date(), 1)), "Moved to tomorrow from the panel")); m.title = "Move it to tomorrow"; a.append(m); }
+      { const m = btn("→ +1 week", () => moveTask(t, iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)), "Pushed a week from the panel")); m.title = "Move it a week later"; a.append(m); }
       a.append(btn("Delete", async () => { if (confirm(`Delete "${t.title}"?`)) await deleteTask(t.id); }, "btn sm danger"));
       card.append(a);
     }
@@ -1245,7 +1245,8 @@ function editForm(t) {
   f.append(sel("Priority", "priority", Object.entries(PRI).map(([k, v]) => [k, `${v.mark} ${v.label}`]), t.priority));
   f.append(sel("Calendar", "bucket", [["work", "Work"], ["home", "Home"]], t.bucket));
   f.append(sel("Job", "job", [["", "—"], ...state.jobs.map((j) => [j.name, j.name])], t.job || ""));
-  f.append(sel("Size", "size", [["", "—"], ...Object.entries(SIZE)], t.size || ""));
+  f.append(sel("Estimated time", "size", [["", "—"], ...Object.entries(SIZE)], t.size || ""));
+  { const hl = field("…or type the hours (2.5)", "hrs", "number", "", false); const hi = hl.querySelector("input"); hi.step = "0.25"; hi.min = "0.25"; hi.placeholder = "hrs"; f.append(hl); }
   f.append(field("Scheduled (on calendar)", "scheduled_date", "date", t.scheduled_date || ""));
   f.append(sel("Status", "status", Object.entries(STATUS), t.status));
   f.append(field("Target date (want it done by)", "target_date", "date", t.target_date || ""));
@@ -1254,6 +1255,9 @@ function editForm(t) {
   f.append(field("Waiting on (if status is Waiting)", "waiting_on", "text", t.waiting_on || ""));
   f.append(sel("Nag until done", "nag_hours", [["0", "No nag"], ["1", "Every hour"], ["2", "Every 2 hrs"], ["4", "Every 4 hrs"], ["24", "Once a day"]], String(t.nag_hours || 0)));
   const notes = el("label", "full", "Notes"); const ta = el("textarea"); ta.name = "notes"; ta.value = t.notes || ""; notes.append(ta); f.append(notes);
+  const pl = el("label", "full check"); const cb = el("input"); cb.type = "checkbox"; cb.name = "planned"; cb.checked = !!t.planned; pl.append(cb, el("span", "", " Planned (dashed) — my intent for that day, the morning plan builds around it")); f.append(pl);
+  // the whole date box opens the picker, not just the little icon
+  f.querySelectorAll('input[type="date"]').forEach((i) => i.addEventListener("click", () => { try { i.showPicker(); } catch {} }));
   const a = el("div", "actions");
   const save = el("button", "btn primary sm", "Save"); save.type = "submit";
   const cancel = el("button", "btn sm", "Cancel"); cancel.type = "button";
@@ -1272,8 +1276,14 @@ function editForm(t) {
     };
     if (patch.status === "done" && !t.done_at) patch.done_at = new Date().toISOString();
     if (patch.status !== "done") patch.done_at = null;
-    if (patch.scheduled_date) patch.planned = t.planned && patch.scheduled_date === t.scheduled_date ? t.planned : false;
-    if (patch.size) patch.confirmed = true;   // Adam set it himself — the "?" comes off
+    patch.planned = fd.get("planned") === "on";
+    const h = Number(g("hrs"));
+    if (g("hrs") && h > 0) {   // typed hours: snap to a size the calendar knows, keep the real number in the notes (one line, replaced each time)
+      patch.size = snapSize(h);
+      const base = (patch.notes || "").split("\n").filter((l) => !/^Adam: [\d.]+ h$/.test(l.trim())).join("\n").trim();
+      patch.notes = (base ? base + "\n" : "") + `Adam: ${h} h`;
+    }
+    patch.confirmed = true;   // Adam looked it over — the "?" comes off
     state.editId = null;
     if (await saveTask(t.id, patch)) toast("Saved");
   });

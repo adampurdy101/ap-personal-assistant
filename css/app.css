@@ -338,6 +338,9 @@ b, strong { font-weight: 700; }
 .mtg.allday.holiday:not(.off) { background: var(--holiday-bg, transparent); color: var(--holiday-ink, var(--ink)); border: 1px dashed var(--holiday-line, #777); font-style: normal; font-weight: 600; }
 .row.holiday { background: var(--holiday-bg, transparent); color: var(--holiday-ink, var(--ink)); border-radius: 4px; padding-left: 6px; }
 .sec .actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 12px 6px; }
+.item .actions .btn.edit { font-weight: 800; border-width: 1.5px; box-shadow: var(--chip-shadow); }
+.form label.check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.form label.check input { width: auto; }
 .brain { display: flex; flex-direction: column; gap: 8px; margin: 0 12px 10px; }
 .bubble { border-radius: 6px; padding: 8px 10px; font-size: 14px; line-height: 1.5; border: 1px solid var(--rule); }
 .bubble.you { background: var(--tan); margin-left: 24px; }
