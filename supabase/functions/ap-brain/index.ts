@@ -1,8 +1,8 @@
-// foreman-brain  ·  verify_jwt = TRUE
-// Foreman's assistant. The app sends what Adam said (brain dump, a question,
-// answers to earlier questions). This calls Claude with tools that read/write
-// the fm_tasks table AS THE LOGGED-IN USER (his JWT + anon key, RLS applies),
-// files everything, reshuffles within the rules, and returns what it did.
+// ap-brain  ·  verify_jwt = TRUE
+// AP Personal Assistant's brain. The app sends what Adam said (brain dump, a
+// question, answers to earlier questions). This calls Claude with tools that
+// read/write the fm_tasks table AS THE LOGGED-IN USER (his JWT + anon key, RLS
+// applies), files everything, reshuffles within the rules, and returns what it did.
 //
 // SECURITY: ANTHROPIC_API_KEY lives only in Supabase Edge Function secrets.
 import Anthropic from "npm:@anthropic-ai/sdk";
@@ -10,7 +10,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
-const MODEL = Deno.env.get("FOREMAN_MODEL") || "claude-sonnet-4-5";
+const MODEL = Deno.env.get("AP_MODEL") || Deno.env.get("FOREMAN_MODEL") || "claude-sonnet-4-5";
 const OWNER_IDS = new Set(["30cbcbfa-7261-47de-8c91-3d97557fc5f9"]);
 
 const ALLOW = ["https://adampurdy101.github.io", "http://localhost:4173", "http://127.0.0.1:4173", "http://localhost:8080"];
@@ -33,7 +33,8 @@ type DB = ReturnType<typeof userClient>;
 
 const SIZE_HOURS: Record<string, number> = { "15m": 0.25, "1h": 1, half: 4, full: 8 };
 const DAY_HOURS = 8; // 7 to 4 with lunch
-const TASK_FIELDS = "id,title,notes,bucket,priority,status,waiting_on,job,size,scheduled_date,target_date,dropdead_date,planned,promised_to,nag_hours";
+const TASK_FIELDS = "id,title,notes,bucket,priority,status,waiting_on,job,size,scheduled_date,target_date,dropdead_date,planned,promised_to,nag_hours,confirmed";
+const OFF_SOURCES = ["pcg_holiday", "pto"]; // all-day rows in fm_meetings that take the whole day off
 
 /* ---------------- tools ---------------- */
 const taskProps = {
@@ -51,6 +52,7 @@ const taskProps = {
   promised_to: { type: "string", description: "Person Adam owes this to" },
   nag_hours: { type: "number", description: "0 = no nag; else nag every N hours until done" },
   planned: { type: "boolean", description: "true = penciled in (Adam's intent, dashed)" },
+  confirmed: { type: "boolean", description: "true ONLY when Adam himself stated the size and the priority. Otherwise leave false: the app shows a '?' badge so he can set them." },
 };
 
 const TOOLS: Anthropic.Tool[] = [
@@ -62,7 +64,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "day_load",
-    description: "Hours already scheduled per day (from each task's size; default 1h) against an 8-hour work day, for a date range. Use before placing work so you don't overfill a day.",
+    description: "Hours already booked per day = work tasks (by size; default 1h) + meetings Adam attends, against an 8-hour work day; weekends and days off (PCG holidays, PTO) have 0 hours. Also lists tasks whose size/priority are still guesses (confirmed=false). Use before placing or moving work.",
     input_schema: { type: "object", properties: { from: { type: "string" }, to: { type: "string" } }, required: ["from", "to"] },
   },
   {
@@ -127,15 +129,29 @@ async function runTool(db: DB, name: string, input: any, today: string, batch: s
     return error ? "ERROR: " + error.message : (data?.length ? JSON.stringify(data) : "No open tasks.");
   }
   if (name === "day_load") {
-    const { data, error } = await db.from("fm_tasks").select("scheduled_date,size,status").gte("scheduled_date", input.from).lte("scheduled_date", input.to).neq("status", "done");
+    const { data, error } = await db.from("fm_tasks").select("id,title,scheduled_date,size,status,bucket,confirmed").gte("scheduled_date", input.from).lte("scheduled_date", input.to).neq("status", "done");
     if (error) return "ERROR: " + error.message;
-    const load: Record<string, number> = {};
-    for (const t of data || []) load[t.scheduled_date] = (load[t.scheduled_date] || 0) + (SIZE_HOURS[t.size || "1h"] ?? 1);
+    const { data: mtgs } = await db.from("fm_meetings").select("day,title,start_at,end_at,all_day,attending,source").gte("day", input.from).lte("day", input.to);
+    const work: Record<string, number> = {}, unconfirmed: Record<string, string[]> = {}, mtg: Record<string, number> = {}, off: Record<string, string> = {};
+    for (const t of data || []) {
+      if (t.bucket === "work") work[t.scheduled_date] = (work[t.scheduled_date] || 0) + (SIZE_HOURS[t.size || "1h"] ?? 1);
+      if (!t.confirmed) (unconfirmed[t.scheduled_date] ||= []).push(`#${t.id} ${t.title}`);
+    }
+    for (const m of mtgs || []) {
+      if (m.all_day && OFF_SOURCES.includes(m.source)) off[m.day] = m.title;
+      else if (!m.all_day && m.attending) mtg[m.day] = (mtg[m.day] || 0) + Math.max(0, (new Date(m.end_at).getTime() - new Date(m.start_at).getTime()) / 3600000);
+    }
     const out: string[] = [];
     const a = new Date(input.from + "T12:00:00Z"), b = new Date(input.to + "T12:00:00Z");
     for (let d = a; d <= b; d = new Date(d.getTime() + 86400000)) {
-      const k = d.toISOString().slice(0, 10), dow = d.getUTCDay();
-      out.push(`${k} ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow]}: ${load[k] || 0}h of ${dow === 0 || dow === 6 ? 0 : DAY_HOURS}h`);
+      const k = d.toISOString().slice(0, 10), dow = d.getUTCDay(), name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow];
+      const weekend = dow === 0 || dow === 6;
+      const w = work[k] || 0, m = weekend || off[k] ? 0 : (mtg[k] || 0), cap = weekend || off[k] ? 0 : DAY_HOURS;
+      let line = off[k] ? `${k} ${name}: OFF (${off[k]}) — no work goes here${w ? `; ${w}h of tasks sitting on it must move` : ""}`
+        : weekend ? `${k} ${name}: weekend (home only)${w ? `; ${w}h of work tasks on it should move` : ""}`
+        : `${k} ${name}: ${w}h tasks + ${m}h meetings = ${w + m}h of ${cap}h${w + m > cap ? " — OVER" : ""}`;
+      if (unconfirmed[k]?.length) line += ` · size/priority still guessed: ${unconfirmed[k].join("; ")}`;
+      out.push(line);
     }
     return out.join("\n");
   }
@@ -143,6 +159,7 @@ async function runTool(db: DB, name: string, input: any, today: string, batch: s
     const row = { ...cleanPatch(input), source: "brain" } as Record<string, unknown>;
     if (!row.size) row.size = "1h";
     if (!row.status) row.status = "not_started";
+    if (row.confirmed !== true) row.confirmed = false;
     const { data, error } = await db.from("fm_tasks").insert(row).select(TASK_FIELDS).single();
     if (error) return "ERROR: " + error.message;
     await logMove(db, batch, "add", data.id, null, data, "");
@@ -198,21 +215,23 @@ function systemPrompt(today: string, now: string): string {
     const d = new Date(base.getTime() + i * 86400000);
     cal.push(`${d.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" })} ${d.toISOString().slice(0, 10)}`);
   }
-  return `You are Foreman, Adam's office manager and personal assistant. Adam is a VDC/BIM specialist at a drywall/framing subcontractor (Revit, AutoCAD, Navisworks, Dusty layout). He has ADD. Your job: he talks, you file, schedule and keep his calendar true so he can just look and do the next thing. He does NOT want to manage this; you do.
+  return `You are AP, Adam's personal assistant and office manager (the app is "AP Personal Assistant"). Adam is a VDC/BIM specialist at a drywall/framing subcontractor (Revit, AutoCAD, Navisworks, Dusty layout). He has ADD. Your job: he talks, you file, schedule and keep his calendar true so he can just look and do the next thing. He does NOT want to manage this; you do.
 
 Today is ${weekday} ${today}${now ? `, ${now}` : ""} (Pacific). Upcoming: ${cal.join(" · ")}. Use these dates exactly; never compute dates yourself.
 
 RULES
 1. Call list_jobs and list_tasks before adding or moving anything. Match new items to existing tasks (update, don't duplicate).
 2. Every task gets: bucket (work unless clearly home), priority, size (default 1h), and a scheduled_date. Unscheduled only if Adam says "someday" or similar.
-3. Work days are Mon-Fri, 7am-4pm, 8 working hours. Use day_load; do not put more than 8h on a day. Weekends: home bucket only, unless Adam says otherwise.
+3. Work days are Mon-Fri, 7am-4pm, 8 working hours. Use day_load; it already counts meetings Adam attends. Do not put more than 8h on a day. Days marked OFF (PCG holidays, PTO) and weekends hold NO work — move anything that lands there. Weekends: home bucket only, unless Adam says otherwise.
 4. Two dates: target (wants it by) and drop-dead (must be by). Set them when he gives a deadline. Never schedule past a drop-dead. If a drop-dead is at risk, say so plainly.
 5. Reshuffle: when a day is full or Adam pencils in new intent, push LOW then NORMAL items toward their target, never past drop-dead. Never move anything with promised_to unless Adam explicitly says so. Urgent stays on today. Give a one-line reason on every move.
 6. Priority: urgent = today or someone is blocked; high = this week or a person is waiting; normal = default; low = whenever.
 7. People: if Adam says he told someone X or owes someone X, set promised_to. If he is waiting on someone, status=waiting + waiting_on.
 8. Ask with ask_adam ONLY when you cannot decide with these rules (missing deadline on something that clearly has one, which job it belongs to, whether a promised item can slip). Max 3 short A/B/C questions. Otherwise decide and go.
 9. Brain dumps: split into separate tasks. Dates like "end of week" = Friday; "next week" = the following Monday unless he says a day.
-10. Be plain and short. Your final reply is read on screen: 2-5 lines, what you filed and what you moved and why. No markdown headers, no fluff.`;
+10. Sizes and priorities you guess stay confirmed=false (the app shows a "?" badge). Set confirmed=true only when Adam himself states the size and the priority. When a day is over 8h and tasks on it are still guesses, ask him for their size/priority in ONE short ask_adam question before moving things.
+11. "Balance this week" means: apply rules 3-5 to Mon-Fri of that week — low first, then normal, toward their targets; never past a drop-dead; never a promised item; urgent stays. Every move gets a one-line reason.
+12. Be plain and short. Your final reply is read on screen: 2-5 lines, what you filed and what you moved and why. No markdown headers, no fluff.`;
 }
 
 Deno.serve(async (req) => {
@@ -274,7 +293,7 @@ Deno.serve(async (req) => {
     await db.from("fm_brain_log").insert({ batch_id: batch, said: text, reply: "(ran out of steps)", actions });
     return json(req, { reply: "That took more steps than I expected. Here's what landed so far; tell me the rest again.", actions, batch_id: batch });
   } catch (e) {
-    console.error("foreman-brain error:", e);
+    console.error("ap-brain error:", e);
     const msg = e instanceof Anthropic.AuthenticationError ? "The Anthropic key on the server is invalid."
       : e instanceof Anthropic.RateLimitError ? "Rate limited for a moment. Try again in a few seconds."
       : "Something went wrong in the brain. Try again. (" + String((e as Error)?.message || e).slice(0, 120) + ")";

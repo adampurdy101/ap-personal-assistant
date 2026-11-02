@@ -1,5 +1,5 @@
-// Foreman service worker — network-first for app files, so updates land fast.
-const VERSION = "fm-v31";
+// AP Personal Assistant service worker — network-first for app files, so updates land fast.
+const VERSION = "ap-v32";
 const SHELL = ["./", "./index.html", "./css/app.css", "./js/app.js", "./js/auth.js", "./js/config.js", "./js/supabase.js", "./manifest.webmanifest", "./icons/icon.svg"];
 
 self.addEventListener("install", (e) => {

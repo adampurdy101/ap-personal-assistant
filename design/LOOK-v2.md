@@ -1,4 +1,4 @@
-# Look v2 — "Personal Assistant" (locked Nov 2, 2026)
+# Look v2 — "AP Personal Assistant" (locked Nov 2, 2026; built Nov 2, 2026 as v32)
 
 Design spec for the next UI pass. Reference render: `look-v2-mock.html` (open in a browser at 1800×1060). Sample data in the mock is placeholder.
 

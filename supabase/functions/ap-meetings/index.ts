@@ -1,5 +1,6 @@
-// foreman-meetings — reads the published PCI Outlook calendar (ICS) and writes
-// meeting TITLES and TIMES only into public.fm_meetings so the Foreman app can draw them.
+// ap-meetings — reads the published PCI Outlook calendar (ICS) and writes
+// meeting TITLES and TIMES only into public.fm_meetings so the AP Personal Assistant app can draw them.
+// Rows from other sources (pcg_holiday, pto = days off) are never touched here.
 // The ICS link lives in public.fm_settings (service-role only), never in the repo.
 // Called every 15 min by pg_cron (x-cron-key header) or by the signed-in owner (Refresh).
 import ICAL from "npm:ical.js@2.1.0";
@@ -53,7 +54,7 @@ Deno.serve(async (req) => {
   let body: any = {};
   try { body = await req.json(); } catch (_) { body = {}; }
 
-  const res = await fetch(s.pci_outlook_ics, { headers: { "User-Agent": "Foreman/1.0" } });
+  const res = await fetch(s.pci_outlook_ics, { headers: { "User-Agent": "AP-Assistant/1.0" } });
   if (!res.ok) return json({ error: `calendar link returned ${res.status}` }, 502);
   const text = await res.text();
 

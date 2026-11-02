@@ -10,5 +10,5 @@ export const CONFIG = {
   // the ONE account this app belongs to; any other login is signed back out
   OWNER_ID: "30cbcbfa-7261-47de-8c91-3d97557fc5f9",
   TZ: "America/Los_Angeles",
-  APP_NAME: "Foreman",
+  APP_NAME: "AP Personal Assistant",
 };

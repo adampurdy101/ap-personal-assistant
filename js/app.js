@@ -1,8 +1,9 @@
 // ============================================================
-//  FOREMAN  ·  app.js
-//  Month / Week / Day calendar · Work / Home / Both · skinny rail that
-//  widens on click · quick add (type or speak) · Tomorrow pencil-in.
-//  Data: Supabase tables fm_tasks / fm_jobs (RLS, owner only).
+//  AP PERSONAL ASSISTANT  ·  app.js
+//  Panel LEFT (Next Up · Status · Today · Meetings · Promises · Tasks · Quick Look),
+//  calendar RIGHT (Month / Week / Day · Work / Home / Both). Quick add (type or
+//  speak), Tomorrow pencil-in, chip push arrows, "?" size/priority popover,
+//  Balance week. Data: Supabase fm_tasks / fm_jobs / fm_meetings / fm_moves.
 // ============================================================
 import { db } from "./supabase.js";
 import { CONFIG } from "./config.js";
@@ -20,6 +21,16 @@ const daysBetween = (a, b) => Math.round((fromISO(b) - fromISO(a)) / 86400000);
 const fmtLong = (s) => fromISO(s).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
 const fmtShort = (s) => fromISO(s).toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" });
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// ISO week number (Mon-start weeks). For a Sunday-start row use the row's Thursday.
+function isoWeek(d) {
+  const x = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const day = x.getUTCDay() || 7;
+  x.setUTCDate(x.getUTCDate() + 4 - day);
+  const y0 = new Date(Date.UTC(x.getUTCFullYear(), 0, 1));
+  return Math.ceil(((x - y0) / 86400000 + 1) / 7);
+}
+const weeksInYear = (y) => isoWeek(new Date(y, 11, 28));
+const rowWeek = (sunday) => isoWeek(addDays(sunday, 4));
 
 const PRI = {
   urgent: { mark: "!!", label: "Urgent" },
@@ -58,7 +69,7 @@ async function loadAll() {
   const [t, j, m] = await Promise.all([
     db.from("fm_tasks").select("*").order("sort").order("created_at"),
     db.from("fm_jobs").select("*").eq("active", true).order("bucket").order("sort"),
-    db.from("fm_meetings").select("id,title,start_at,end_at,all_day,attending,day,updated_at").gte("day", from).lte("day", to).order("start_at"),
+    db.from("fm_meetings").select("id,title,start_at,end_at,all_day,attending,day,updated_at,source").gte("day", from).lte("day", to).order("start_at"),
   ]);
   if (t.error) { toast("Load failed: " + t.error.message); return; }
   state.tasks = t.data || [];
@@ -136,24 +147,69 @@ setInterval(() => { if (refreshQueued && !userIsTyping()) refresh(); }, 2000);
 // ---------- derived ----------
 const inBucket = (t) => state.bucket === "both" || t.bucket === state.bucket;
 const visible = (t) => inBucket(t) && (state.showDone || t.status !== "done");
-const tasksOn = (dateISO) => state.tasks.filter((t) => visible(t) && t.scheduled_date === dateISO).sort(byPriority);
+const tasksOn = (dateISO) => state.tasks.filter((t) => visible(t) && t.scheduled_date === dateISO).sort(dayOrder);
 const unscheduled = () => state.tasks.filter((t) => visible(t) && !t.scheduled_date).sort(byPriority);
-// ---------- meetings (PCI Outlook, read-only, work calendar) ----------
+// ---------- meetings (PCI Outlook, read-only, work calendar) + off days ----------
 const SIZE_HRS = { "15m": 0.25, "1h": 1, half: 4, full: 8 };
 const DAY_HRS = 8;
+const OFF_SOURCES = new Set(["pcg_holiday", "pto"]);   // all-day rows that take the whole day off
 const showMeetings = () => state.bucket !== "home";
 const meetingsOn = (dISO) => showMeetings() ? state.meetings.filter((m) => m.day === dISO) : [];
 const timedOn = (dISO) => meetingsOn(dISO).filter((m) => !m.all_day);
 const allDayOn = (dISO) => meetingsOn(dISO).filter((m) => m.all_day);
+const isOff = (m) => m.all_day && OFF_SOURCES.has(m.source);
+const offOn = (dISO) => state.meetings.filter((m) => m.day === dISO && isOff(m));
+const isWeekend = (dISO) => { const d = fromISO(dISO).getDay(); return d === 0 || d === 6; };
+const dayCapacity = (dISO) => (isWeekend(dISO) || offOn(dISO).length) ? 0 : DAY_HRS;
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).replace(":00", "").replace(" AM", "a").replace(" PM", "p");
 const mtgHrs = (m) => Math.max(0, (new Date(m.end_at) - new Date(m.start_at)) / 3600000);
 const fmtHrs = (h) => (Math.round(h * 4) / 4).toString().replace(/\.0$/, "") + " h";
 // what counts against the 8 h day: meetings he attends + work tasks on that day
 function dayLoad(dISO) {
-  const mtg = timedOn(dISO).filter((m) => m.attending).reduce((a, m) => a + mtgHrs(m), 0);
+  const cap = dayCapacity(dISO);
+  const off = !isWeekend(dISO) && cap === 0;   // holiday / PTO: he is not in those meetings
+  const mtg = off ? 0 : timedOn(dISO).filter((m) => m.attending).reduce((a, m) => a + mtgHrs(m), 0);
   const work = state.tasks.filter((t) => t.bucket === "work" && t.status !== "done" && t.scheduled_date === dISO)
     .reduce((a, t) => a + (SIZE_HRS[t.size] ?? 1), 0);
-  return { mtg, work, total: mtg + work, free: DAY_HRS - mtg - work };
+  return { mtg, work, total: mtg + work, cap, free: cap - mtg - work, over: mtg + work > cap };
+}
+// the next day a task can land on: work skips weekends + off days, home takes any day
+function nextDay(fromISOStr, dir, bucket) {
+  let d = fromISO(fromISOStr);
+  for (let i = 0; i < 30; i++) {
+    d = addDays(d, dir);
+    const s = iso(d);
+    if (bucket === "home") return s;
+    if (!isWeekend(s) && !offOn(s).length) return s;
+  }
+  return iso(d);
+}
+// move a task and log it like the brain does, so Undo and "why" work the same way
+async function moveTask(t, toISO, reason, { ask = true } = {}) {
+  if (!toISO || toISO === t.scheduled_date) return false;
+  if (ask && t.promised_to && !confirm(`"${t.title}" is promised to ${t.promised_to}. Move it anyway?`)) return false;
+  if (ask && t.dropdead_date && toISO > t.dropdead_date && !confirm(`That is past its drop-dead (${fmtShort(t.dropdead_date)}). Move it anyway?`)) return false;
+  const before = { ...t };
+  const patch = { scheduled_date: toISO, planned: false };
+  const { error } = await db.from("fm_tasks").update(patch).eq("id", t.id);
+  if (error) { toast("Move failed: " + error.message); return false; }
+  Object.assign(t, patch);
+  const after = { ...t };
+  await db.from("fm_moves").insert({ batch_id: "app-" + todayISO(), kind: "move", task_id: t.id, before, after, reason, from_date: before.scheduled_date, to_date: toISO }).then(() => {}, () => {});
+  render();
+  return true;
+}
+// order of a day (rulebook 5.3): urgent → promises due → drop-deads within 2 days → planned → high → normal → low
+function dayOrder(a, b) {
+  const r = (t) => {
+    const today = todayISO(), soon = iso(addDays(new Date(), 2));
+    if (t.priority === "urgent") return 0;
+    if (t.promised_to && (!t.dropdead_date || t.dropdead_date <= soon)) return 1;
+    if (t.dropdead_date && t.dropdead_date <= soon) return 2;
+    if (t.planned) return 3;
+    return 4 + (PRI_ORDER[t.priority] ?? 2);
+  };
+  return (r(a) - r(b)) || (a.sort - b.sort) || (a.id - b.id);
 }
 async function setAttending(m, attending) {
   // applies to every meeting with this exact title (the whole series)
@@ -169,13 +225,14 @@ async function setAttending(m, attending) {
   render();
 }
 function meetingLine(m, { compact = false } = {}) {
-  const cls = "mtg " + (m.all_day ? "allday" : m.attending ? "going" : "invited");
+  const off = isOff(m);
+  const cls = "mtg " + (off ? "allday off" : m.all_day ? "allday" : m.attending ? "going" : "invited");
   const mark = m.all_day ? "◇" : m.attending ? "■" : "◌";
-  const when = m.all_day ? "All day" : `${fmtTime(m.start_at)}–${fmtTime(m.end_at)}`;
+  const when = m.all_day ? (off ? "Day off" : "All day") : `${fmtTime(m.start_at)}–${fmtTime(m.end_at)}`;
   const n = el("div", cls);
   if (compact) n.textContent = m.all_day ? `${mark} ${m.title}` : `${mark} ${fmtTime(m.start_at)} ${m.title}`;
   else n.innerHTML = `<span class="mk">${mark}</span><span class="tm">${esc(when)}</span><span class="tt">${esc(m.title)}</span>`;
-  n.title = `${m.title} · ${when} · ${m.all_day ? "Holiday / all day" : m.attending ? "You're in this one — counts against your day" : "Invited — not counted on your day"}`;
+  n.title = `${m.title} · ${when} · ${off ? "Day off — no work goes here" : m.all_day ? "All day (from Outlook)" : m.attending ? "You're in this one — counts against your day" : "Invited — not counted on your day"}`;
   return n;
 }
 function meetingCard(m) {
@@ -192,9 +249,9 @@ function meetingCard(m) {
 }
 function loadLine(dISO) {
   const L = dayLoad(dISO);
-  const over = L.total > DAY_HRS;
-  const n = el("div", "load" + (over ? " over" : ""));
-  n.textContent = `${over ? "!! Over by " + fmtHrs(L.total - DAY_HRS) + " · " : ""}Work ${fmtHrs(L.work)} + meetings ${fmtHrs(L.mtg)} = ${fmtHrs(L.total)} of 8 h`;
+  const n = el("div", "load" + (L.over ? " over" : ""));
+  if (L.cap === 0 && offOn(dISO).length) n.textContent = `${L.over ? "!! " : ""}Day off — ${offOn(dISO).map((m) => m.title).join(", ")}${L.total ? ` · ${fmtHrs(L.total)} booked anyway` : ""}`;
+  else n.textContent = `${L.over ? "!! Over by " + fmtHrs(L.total - L.cap) + " · " : ""}Work ${fmtHrs(L.work)} + meetings ${fmtHrs(L.mtg)} = ${fmtHrs(L.total)} of ${L.cap} h`;
   return n;
 }
 function meetingsSection(r, dISO, title = "Meetings") {
@@ -262,8 +319,22 @@ function renderCalendar() {
 
 function chipFor(t) {
   const c = el("span", `chip p-${t.priority}` + (t.planned ? " planned" : "") + (t.bucket === "home" && state.bucket === "both" ? " bucket-home" : "") + (t.status === "done" ? " is-done" : ""));
-  c.textContent = `${PRI[t.priority].mark} ${t.title}`;
-  c.title = tooltip(t);
+  c.append(el("span", "sym", PRI[t.priority].mark));
+  if (!t.confirmed && t.status !== "done") {
+    const q = el("span", "q", "?");
+    q.title = "I guessed the size and priority — click to set them";
+    q.addEventListener("click", (e) => { e.stopPropagation(); openQuickFix(t, c); });
+    c.append(q);
+  }
+  c.append(document.createTextNode(t.title));
+  if (t.scheduled_date && t.status !== "done") {
+    const l = el("span", "mv l", "‹"); l.title = "Push a day earlier";
+    const r = el("span", "mv r", "›"); r.title = "Push a day later";
+    l.addEventListener("click", (e) => { e.stopPropagation(); moveTask(t, nextDay(t.scheduled_date, -1, t.bucket), "Pushed a day earlier with the chip arrow"); });
+    r.addEventListener("click", (e) => { e.stopPropagation(); moveTask(t, nextDay(t.scheduled_date, 1, t.bucket), "Pushed a day later with the chip arrow"); });
+    c.append(l, r);
+  }
+  c.title = tooltip(t) + (t.confirmed ? "" : " · size/priority guessed (?)");
   c.draggable = true;
   c.dataset.id = t.id;
   c.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/plain", String(t.id)); e.dataTransfer.effectAllowed = "move"; });
@@ -271,7 +342,55 @@ function chipFor(t) {
   return c;
 }
 
-function dayCell(d, { other = false, max = 4 } = {}) {
+// "?" popover: 2 questions — how long, which priority — then Save
+let popEl = null;
+function closeQuickFix() { if (popEl) { popEl.remove(); popEl = null; } }
+document.addEventListener("click", (e) => { if (popEl && !popEl.contains(e.target)) closeQuickFix(); });
+function openQuickFix(t, anchor) {
+  closeQuickFix();
+  const p = el("div", "pop");
+  const pick = { size: t.size || "1h", priority: t.priority, hrs: "" };
+  p.innerHTML = `<div class="ttl">I guessed these for <b>${esc(t.title)}</b> — set them:</div>`;
+  const mk = (label, cls) => { const h = el("span", "h", label); p.append(h); const r = el("div", "r " + cls); p.append(r); return r; };
+  const sizes = mk("HOW LONG", "sz");
+  const szBtns = {};
+  [["15m", "15 m"], ["1h", "1 h"], ["half", "½ day"], ["full", "Full"]].forEach(([v, txt]) => {
+    const b = el("button", "o" + (pick.size === v && !pick.hrs ? " on" : ""), txt); b.type = "button";
+    b.addEventListener("click", () => { pick.size = v; pick.hrs = ""; hrs.value = ""; Object.values(szBtns).forEach((x) => x.classList.remove("on")); b.classList.add("on"); });
+    szBtns[v] = b; sizes.append(b);
+  });
+  const hrs = el("input", "hrs"); hrs.type = "number"; hrs.min = "0.25"; hrs.step = "0.25"; hrs.placeholder = "hrs"; hrs.title = "Or type the hours";
+  hrs.addEventListener("input", () => { pick.hrs = hrs.value; Object.values(szBtns).forEach((x) => x.classList.remove("on")); });
+  sizes.append(hrs);
+  const pris = mk("PRIORITY", "pr");
+  const prBtns = {};
+  Object.entries(PRI).forEach(([v, d]) => {
+    const b = el("button", "o" + (pick.priority === v ? " on" : ""), d.mark); b.type = "button"; b.title = d.label;
+    b.addEventListener("click", () => { pick.priority = v; Object.values(prBtns).forEach((x) => x.classList.remove("on")); b.classList.add("on"); });
+    prBtns[v] = b; pris.append(b);
+  });
+  const save = el("button", "o save", "Save"); save.type = "button";
+  save.addEventListener("click", async () => {
+    const h = Number(pick.hrs);
+    // free-entry hours snap to the nearest bucket the calendar knows (15 m · 1 h · ½ day · full), noted in the task
+    let size = pick.size, note = null;
+    if (pick.hrs && h > 0) { size = h <= 0.5 ? "15m" : h <= 2 ? "1h" : h <= 5 ? "half" : "full"; note = `Adam: ${h} h`; }
+    const patch = { size, priority: pick.priority, confirmed: true };
+    if (note) patch.notes = (t.notes ? t.notes + "\n" : "") + note;
+    closeQuickFix();
+    if (await saveTask(t.id, patch)) toast(`Set: ${SIZE[size]} · ${PRI[pick.priority].label}`);
+  });
+  pris.append(save);
+  p.addEventListener("click", (e) => e.stopPropagation());
+  document.body.append(p);
+  const r = anchor.getBoundingClientRect();
+  const left = Math.max(8, Math.min(window.innerWidth - 310, r.left));
+  const top = r.bottom + 6 + 170 > window.innerHeight ? Math.max(8, r.top - 176) : r.bottom + 6;
+  p.style.left = left + "px"; p.style.top = top + "px";
+  popEl = p;
+}
+
+function dayCell(d, { other = false, max = 4, fit = 0 } = {}) {
   const dISO = iso(d);
   const cell = el("div", "day");
   if (other) cell.classList.add("other");
@@ -287,39 +406,56 @@ function dayCell(d, { other = false, max = 4 } = {}) {
   if (isToday) numLabel.append(el("b", "today-tag", "TODAY"));
   num.append(numLabel);
   const weekday = d.getDay() !== 0 && d.getDay() !== 6;
+  const off = offOn(dISO);
+  if (off.length) cell.classList.add("off");
   const L = dayLoad(dISO);
-  let meter = null;
-  if (showMeetings() && weekday && (L.total > 0)) {
-    const over = L.total > DAY_HRS;
-    const ld = el("span", "count" + (over ? " over" : ""), `${over ? "!! " : ""}${fmtHrs(L.total)}/8`);
-    ld.title = `Work ${fmtHrs(L.work)} + meetings you attend ${fmtHrs(L.mtg)}${over ? " — over the 8 h day" : ""}`;
+  const past = !isToday && dISO < todayISO();
+  let cap = null;
+  if (showMeetings() && weekday && off.length) {
+    const o = el("span", "count off", L.total ? `!! ${fmtHrs(L.total)} ON A DAY OFF` : "OFF");
+    o.title = off.map((m) => m.title).join(", ") + (L.total ? " — nothing should be booked here" : "");
+    num.append(o);
+  } else if (showMeetings() && weekday && (L.total > 0 || !past)) {
+    const ld = el("span", "count" + (L.over ? " over" : ""), L.total ? `${L.over ? "!! " : ""}${fmtHrs(L.total)}/8` : "");
+    ld.title = `Work ${fmtHrs(L.work)} + meetings you attend ${fmtHrs(L.mtg)}${L.over ? " — over the 8 h day" : ""}`;
     num.append(ld);
-    meter = el("div", "meter" + (over ? " over" : ""));
-    const fill = el("i"); fill.style.width = Math.min(100, Math.round(L.total / DAY_HRS * 100)) + "%";
-    meter.append(fill); meter.title = ld.title;
+    if (!past) {
+      cap = el("div", "cap" + (L.over ? " over" : ""));
+      const fill = el("i"); fill.style.width = Math.min(100, Math.round(L.total / DAY_HRS * 100)) + "%";
+      cap.append(fill); cap.title = ld.title || "Hours booked of 8";
+    }
   } else if (items.length) num.append(el("span", "count", `${items.length}`));
   cell.append(num);
-  if (meter) cell.append(meter);
   const due = state.tasks.filter((t) => visible(t) && t.status !== "done" && t.dropdead_date === dISO);
   if (due.length) {
     cell.classList.add("has-dd");
-    const tab = el("div", "dd");
+    const tab = el("div", "dd", "DD");
     tab.title = "Drop-dead today:\n" + due.map((t) => "• " + t.title).join("\n");
     tab.setAttribute("aria-label", `${due.length} drop-dead due`);
     cell.append(tab);
   }
+  // lines, most important first: days off → meetings you go to → tasks → "+N more" → Outlook all-day items → invited
   const going = timedOn(dISO).filter((m) => m.attending);
   const invited = timedOn(dISO).filter((m) => !m.attending);
-  allDayOn(dISO).forEach((m) => cell.append(meetingLine(m, { compact: true })));
+  const allDay = allDayOn(dISO);
+  allDay.filter(isOff).forEach((m) => cell.append(meetingLine(m, { compact: true })));
   going.forEach((m) => cell.append(meetingLine(m, { compact: true })));
-  if (max > 4) invited.forEach((m) => cell.append(meetingLine(m, { compact: true })));
-  else if (invited.length) {
-    const inv = el("div", "mtg invited", `◌ ${invited.length} invited`);
-    inv.title = invited.map((m) => `${fmtTime(m.start_at)} ${m.title}`).join("\n") + "\n(not counted on your day)";
-    cell.append(inv);
+  let room = fit ? Math.max(0, fit - cell.querySelectorAll(".mtg").length) : 99;
+  let show = Math.min(max, room);
+  if (items.length > show) show = Math.max(0, Math.min(show, room - 1));
+  items.slice(0, show).forEach((t) => cell.append(chipFor(t)));
+  room -= show;
+  if (items.length > show) { const m = el("div", "more", `+${items.length - show} more`); m.title = items.slice(show).map((t) => PRI[t.priority].mark + " " + t.title).join("\n"); cell.append(m); room -= 1; }
+  allDay.filter((m) => !isOff(m)).forEach((m) => { if (room > 0) { cell.append(meetingLine(m, { compact: true })); room -= 1; } });
+  if (invited.length && room > 0) {
+    if (max > 4) invited.forEach((m) => cell.append(meetingLine(m, { compact: true })));
+    else {
+      const inv = el("div", "mtg invited", `◌ ${invited.length} invited`);
+      inv.title = invited.map((m) => `${fmtTime(m.start_at)} ${m.title}`).join("\n") + "\n(not counted on your day)";
+      cell.append(inv);
+    }
   }
-  items.slice(0, max).forEach((t) => cell.append(chipFor(t)));
-  if (items.length > max) cell.append(el("div", "more", `+${items.length - max} more`));
+  if (cap) cell.append(cap);
 
   cell.addEventListener("click", () => openDay(dISO));
   cell.addEventListener("dragover", (e) => { e.preventDefault(); cell.classList.add("drop"); });
@@ -327,7 +463,8 @@ function dayCell(d, { other = false, max = 4 } = {}) {
   cell.addEventListener("drop", async (e) => {
     e.preventDefault(); cell.classList.remove("drop");
     const id = Number(e.dataTransfer.getData("text/plain"));
-    if (id) { await saveTask(id, { scheduled_date: dISO, planned: false }); toast("Moved to " + fmtShort(dISO)); }
+    const t = state.tasks.find((x) => x.id === id);
+    if (t && await moveTask(t, dISO, "Dragged to " + fmtShort(dISO))) toast("Moved to " + fmtShort(dISO));
   });
   return cell;
 }
@@ -342,14 +479,21 @@ const firstOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
 const monthRows = (m) => Math.ceil((m.getDay() + new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate()) / 7);
 const sameMonth = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
 const monthKey = (d) => `${d.getFullYear()}-${d.getMonth()}`;
-const M = { scroller: null, head: null, first: null, last: null, lastScroll: 0, pending: null };
+const M = { scroller: null, head: null, first: null, last: null, lastScroll: 0, pending: null, fit: 0 };
+const LINE_PX = 23, CELL_CHROME = 42;   // one chip/meeting line · number row + load bar + padding
+const fitFor = (rowh) => Math.max(1, Math.floor((rowh - CELL_CHROME) / LINE_PX));
 
 function weekRow(start, focusKey, max) {
   const row = el("div", "mweek");
   row.dataset.start = iso(start);
+  const gut = el("div", "gut");
+  gut.append(el("span", "", "WK"), el("b", "", String(rowWeek(start))));
+  gut.title = `Week ${rowWeek(start)} of ${weeksInYear(addDays(start, 4).getFullYear())}`;
+  if (todayISO() >= iso(start) && todayISO() <= iso(addDays(start, 6))) gut.classList.add("cur");
+  row.append(gut);
   for (let i = 0; i < 7; i++) {
     const d = addDays(start, i);
-    const cell = dayCell(d, { other: monthKey(d) !== focusKey, max });
+    const cell = dayCell(d, { other: monthKey(d) !== focusKey, max, fit: M.fit });
     cell.dataset.month = monthKey(d);
     if (monthKey(addDays(d, -7)) !== monthKey(d)) cell.classList.add("mtop");
     if (iso(d) === todayISO()) row.classList.add("cur");
@@ -372,17 +516,19 @@ function renderMonth(body) {
 
   const scroller = el("div", "mscroll");
   const head = el("div", "mhead");
-  ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].forEach((d, i) => head.append(el("div", "dow" + (i === new Date().getDay() ? " td" : ""), d)));
+  head.append(el("div", "gut hd0", "WK"));
+  DOW_FULL.forEach((d, i) => head.append(el("div", "dow" + (i === new Date().getDay() ? " td" : "") + (i === 0 || i === 6 ? " wkd" : ""), d)));
   scroller.append(head);
+  body.append(scroller);
+  // Row height: the focused month fills the screen exactly. Known before the rows are built, so each cell knows its room.
+  const h = scroller.clientHeight - head.offsetHeight;
+  const rowh = Math.max(96, Math.floor(h / monthRows(focus)));
+  scroller.style.setProperty("--rowh", rowh + "px");
+  M.fit = fitFor(rowh);
   const frag = document.createDocumentFragment();
   for (let w = 0; w < weeks; w++) frag.append(weekRow(addDays(winStart, w * 7), focusKey, max));
   scroller.append(frag);
-  body.append(scroller);
   M.scroller = scroller; M.head = head; M.first = winStart; M.last = addDays(winStart, weeks * 7);
-
-  // Row height: the focused month fills the screen exactly.
-  const h = scroller.clientHeight - head.offsetHeight;
-  scroller.style.setProperty("--rowh", Math.max(96, Math.floor(h / monthRows(focus))) + "px");
   $("cal-title").textContent = focus.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 
   // Land: explicit jump (arrows / Today) or the same spot as before the redraw.
@@ -408,7 +554,7 @@ function monthOnScroll() {
   if (!sc || !sc.isConnected) return;
   const rows = sc.querySelectorAll(".mweek");
   if (!rows.length) return;
-  const rowH = rows[0].offsetHeight + 4;
+  const rowH = rows[0].offsetHeight + 5;
   const top = sc.scrollTop;
   const firstTop = rows[0].offsetTop - head.offsetHeight;
   const idx = Math.max(0, Math.min(rows.length - 1, Math.floor((top - firstTop) / rowH)));
@@ -449,11 +595,12 @@ function renderWeek(body) {
   const grid = el("div", "week");
   for (let i = 0; i < 7; i++) {
     const d = addDays(s, i);
-    grid.append(el("div", "dow", d.toLocaleDateString("en-US", { weekday: "short", day: "numeric" })));
+    grid.append(el("div", "dow" + (iso(d) === todayISO() ? " td" : "") + (i === 0 || i === 6 ? " wkd" : ""), d.toLocaleDateString("en-US", { weekday: "long", day: "numeric" })));
   }
   for (let i = 0; i < 7; i++) grid.append(dayCell(addDays(s, i), { max: 12 }));
   body.append(grid);
 }
+const DOW_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 function renderDay(body) {
   const dISO = iso(state.cursor);
@@ -477,7 +624,7 @@ function renderRail() {
   renderSkinny(r);
 }
 
-// ---------- Foreman brain (Supabase edge function foreman-brain) ----------
+// ---------- AP brain (Supabase edge function ap-brain) ----------
 const brain = { busy: false, log: [], history: [], batch: null, questions: null, lastBatch: null };
 
 async function askBrain(text) {
@@ -488,7 +635,7 @@ async function askBrain(text) {
   const { data: s } = await db.auth.getSession();
   const now = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
   try {
-    const res = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/foreman-brain`, {
+    const res = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/ap-brain`, {
       method: "POST",
       headers: { "Content-Type": "application/json", apikey: CONFIG.SUPABASE_KEY, Authorization: `Bearer ${s.session.access_token}` },
       body: JSON.stringify({ text, today: todayISO(), now, history: brain.history, batch_id: brain.batch }),
@@ -497,11 +644,11 @@ async function askBrain(text) {
     brain.history.push({ role: "user", content: text });
     if (out.reply) brain.history.push({ role: "assistant", content: out.reply });
     brain.history = brain.history.slice(-10);
-    brain.log.push({ who: "foreman", text: out.reply || "(no reply)", actions: out.actions || [], questions: out.questions || null });
+    brain.log.push({ who: "ap", text: out.reply || "(no reply)", actions: out.actions || [], questions: out.questions || null });
     if (out.pending) { brain.batch = out.batch_id; brain.questions = out.questions; }
     else { brain.batch = null; if ((out.actions || []).length) brain.lastBatch = out.batch_id; }
   } catch (e) {
-    brain.log.push({ who: "foreman", text: "Couldn't reach the brain: " + (e.message || e) });
+    brain.log.push({ who: "ap", text: "Couldn't reach the brain: " + (e.message || e) });
   }
   brain.busy = false;
   await loadAll();
@@ -526,17 +673,17 @@ async function undoLastBatch() {
     }
   }
   await db.from("fm_moves").delete().eq("batch_id", brain.lastBatch);
-  brain.log.push({ who: "foreman", text: `Undid ${moves.length} change${moves.length === 1 ? "" : "s"}.` });
+  brain.log.push({ who: "ap", text: `Undid ${moves.length} change${moves.length === 1 ? "" : "s"}.` });
   brain.lastBatch = null;
   await loadAll();
 }
 
 function renderBrainPanel(r) {
-  panelHeader(r, "Foreman", brain.busy ? "thinking…" : "");
+  panelHeader(r, "Assistant", brain.busy ? "thinking…" : "");
   const box = el("div", "brain");
   brain.log.slice(-8).forEach((m) => {
     const b = el("div", "bubble " + (m.who === "you" ? "you" : "fm"));
-    b.append(el("div", "who", m.who === "you" ? "You" : "Foreman"));
+    b.append(el("div", "who", m.who === "you" ? "You" : "Assistant"));
     b.append(el("div", "txt", m.text));
     if (m.actions && m.actions.length) {
       const ul = el("ul", "acts");
@@ -576,7 +723,7 @@ function renderBrainPanel(r) {
     r.append(qwrap);
   }
 
-  const foot = el("div", "actions");
+  const foot = el("div", "brain-foot");
   const inp = el("input"); inp.type = "text"; inp.placeholder = "Say more…"; inp.className = "brain-input";
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter" && inp.value.trim()) { const v = inp.value.trim(); inp.value = ""; askBrain(v); } });
   const mic = el("button", "mic"); mic.type = "button"; mic.innerHTML = MIC_SVG; mic.title = "Speak";
@@ -586,113 +733,266 @@ function renderBrainPanel(r) {
   r.append(foot);
 }
 
-function miniRow(t) {
-  const row = el("div", `row p-${t.priority}` + (t.planned ? " planned" : ""));
+
+// a panel card: olive label strip + rows
+function card(r, label, { sub = "", cls = "" } = {}) {
+  const s = el("section", "sec" + (cls ? " " + cls : ""));
+  const lab = el("div", "lab", label);
+  if (sub) lab.append(el("small", "", sub));
+  s.append(lab);
+  r.append(s);
+  return s;
+}
+function rowFor(sec, t, { when = "" } = {}) {
+  const row = el("div", "row link");
+  row.append(el("span", "sym" + (t.priority === "urgent" ? " u" : ""), PRI[t.priority].mark));
+  if (!t.confirmed && t.status !== "done") { const q = el("span", "sym q", "?"); q.title = "size/priority guessed — click the ? on its chip to set"; row.append(q); }
+  row.append(document.createTextNode(t.title));
   const s = statusLine(t);
-  row.innerHTML = `${esc(PRI[t.priority].mark)} ${esc(t.title)}<small>${esc(s.text)}${t.job ? " · " + esc(t.job) : ""}</small>`;
+  if (s.text !== "Not started") row.append(el("i", "", s.text));
+  if (t.job) row.append(el("i", "", t.job));
+  if (when) row.append(el("span", "when", when));
   row.title = tooltip(t);
   row.addEventListener("click", () => t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
+  sec.append(row);
   return row;
+}
+const DAY_START = 7, DAY_END = 16; // 7 a.m. – 4 p.m.
+function nowMinutes() { const n = new Date(); return n.getHours() * 60 + n.getMinutes(); }
+function workLeftText() {
+  const m = nowMinutes(), end = DAY_END * 60, start = DAY_START * 60;
+  if (m < start) return `starts at 7a · ${Math.round((start - m) / 60 * 10) / 10} h to go`;
+  if (m >= end) return "day's over";
+  const left = end - m;
+  return `${Math.floor(left / 60)} h ${pad(left % 60)} m left`;
+}
+
+// which task Adam should be on right now: first open item on today in the day's order
+function nextUp() {
+  const today = todayISO();
+  const open = tasksOn(today).filter((t) => t.status !== "done");
+  const working = open.find((t) => t.status === "working");
+  return working || open[0] || null;
 }
 
 function renderSkinny(r) {
   const today = todayISO();
-  // Today
-  const h = el("h3"); h.append("Today", el("span", "muted", fmtShort(today)));
-  r.append(h);
   const todayItems = tasksOn(today);
-  if (showMeetings()) {
-    r.append(loadLine(today));
-    const ms = meetingsOn(today).sort((a, b) => a.start_at.localeCompare(b.start_at));
-    if (ms.length) {
-      const mb = el("div", "mtgs");
-      ms.forEach((m) => { const n = meetingLine(m); n.addEventListener("click", () => openDay(today)); mb.append(n); });
-      r.append(mb);
-    }
-  }
-  const box = el("div", "mini");
-  todayItems.forEach((t) => box.append(miniRow(t)));
-  if (!todayItems.length) box.append(el("div", "empty", "Nothing scheduled today."));
-  r.append(box);
+  const open = todayItems.filter((t) => t.status !== "done");
 
-  // Overdue / at risk (anywhere)
-  const risky = state.tasks.filter((t) => visible(t) && t.scheduled_date !== today && (
+  // 1. NEXT UP
+  const nx = nextUp();
+  const sNext = card(r, "Next up", { cls: "focus" });
+  if (nx) {
+    const row = el("div", "nx");
+    row.append(el("span", "nxsym" + (nx.priority === "urgent" ? "" : " calm"), PRI[nx.priority].mark));
+    const txt = el("div", "nxt");
+    txt.append(el("b", "", nx.title));
+    const bits = [SIZE[nx.size] || "1 hr", PRI[nx.priority].label];
+    if (nx.dropdead_date) bits.push(nx.dropdead_date === today ? "drop-dead today" : "drop-dead " + fmtShort(nx.dropdead_date));
+    else if (nx.target_date) bits.push("target " + fmtShort(nx.target_date));
+    if (nx.promised_to) bits.push("promised to " + nx.promised_to);
+    if (nx.status === "working") bits.push("working");
+    txt.append(el("small", "", bits.join(" · ")));
+    row.append(txt);
+    row.title = tooltip(nx);
+    row.addEventListener("click", () => openDay(today, nx.id));
+    sNext.append(row);
+    const bt = el("div", "nxbtn");
+    const ok = el("button", "btn ok", "✓ Done"); ok.addEventListener("click", () => saveTask(nx.id, { status: "done", done_at: new Date().toISOString() }));
+    const push = el("button", "btn push", "Push →"); push.title = "Move it to the next work day";
+    push.addEventListener("click", async () => { const to = nextDay(today, 1, nx.bucket); if (await moveTask(nx, to, "Pushed from Next up")) toast(`Pushed to ${fmtShort(to)}`); });
+    const more = el("button", "btn", "More…"); more.addEventListener("click", () => openDay(today, nx.id));
+    bt.append(ok, push, more);
+    if (!nx.confirmed) { const fix = el("button", "btn", "? Set size"); fix.title = "I guessed the size and priority"; fix.addEventListener("click", () => openQuickFix(nx, fix)); bt.append(fix); }
+    sNext.append(bt);
+  } else {
+    sNext.append(el("div", "empty", todayItems.length ? "Everything on today is done." : "Nothing on today. Quick add or tell your assistant."));
+  }
+
+  // 2. STATUS
+  const overdue = state.tasks.filter((t) => visible(t) && t.status !== "done" && t.dropdead_date && t.dropdead_date < today);
+  const dueToday = state.tasks.filter((t) => visible(t) && t.status !== "done" && t.dropdead_date === today);
+  const overDays = [];
+  for (let i = 0; i < 7; i++) { const d = iso(addDays(new Date(), i)); if (!isWeekend(d) && dayLoad(d).over && showMeetings()) overDays.push(d); }
+  const parts = [];
+  if (overdue.length) parts.push(`!! ${overdue.length} overdue`);
+  if (dueToday.length) parts.push(`${dueToday.length} drop-dead today`);
+  if (overDays.length) parts.push(`${overDays.length} day${overDays.length === 1 ? "" : "s"} over 8 h`);
+  const sStat = card(r, "Status");
+  sStat.append(el("div", "status" + (parts.length ? "" : " ok"), parts.length ? parts.join(" · ") : "On track"));
+  const risky = state.tasks.filter((t) => visible(t) && t.status !== "done" && t.scheduled_date !== today && (
     (t.dropdead_date && t.dropdead_date < today) || (t.target_date && t.target_date < today)
   )).sort(byPriority);
-  if (risky.length) {
-    r.append(el("h3", "", "Needs attention"));
-    const b2 = el("div", "mini");
-    risky.slice(0, 6).forEach((t) => b2.append(miniRow(t)));
-    r.append(b2);
+  risky.slice(0, 4).forEach((t) => rowFor(sStat, t));
+  const un = unscheduled();
+  const inbox = el("div", "row link"); inbox.append(el("b", "", `Inbox: ${un.length} unscheduled`), el("i", "", un.length ? "give each a day →" : ""));
+  inbox.addEventListener("click", () => openUnscheduled());
+  sStat.append(inbox);
+
+  // 3. TODAY — 7 to 4 timeline
+  const L = dayLoad(today);
+  const sToday = card(r, "Today · " + fromISO(today).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }));
+  if (showMeetings()) {
+    const tl = el("div", "tl");
+    const bar = el("div", "tlbar");
+    const span = (DAY_END - DAY_START) * 60;
+    timedOn(today).forEach((m) => {
+      const a = new Date(m.start_at), b = new Date(m.end_at);
+      const s = Math.max(0, a.getHours() * 60 + a.getMinutes() - DAY_START * 60), e = Math.min(span, b.getHours() * 60 + b.getMinutes() - DAY_START * 60);
+      if (e <= 0 || s >= span) return;
+      const seg = el("i", "m" + (m.attending ? "" : " inv")); seg.style.left = (s / span * 100) + "%"; seg.style.width = (Math.max(e - s, 8) / span * 100) + "%";
+      seg.title = `${m.title} ${fmtTime(m.start_at)}–${fmtTime(m.end_at)}${m.attending ? "" : " (invited)"}`;
+      bar.append(seg);
+    });
+    const nm = nowMinutes() - DAY_START * 60;
+    if (nm >= 0 && nm <= span) { const now = el("i", "now"); now.style.left = (nm / span * 100) + "%"; bar.append(now); }
+    tl.append(bar);
+    const ticks = el("div", "tlticks"); ["7a", "8", "9", "10", "11", "12", "1", "2", "3", "4p"].forEach((x) => ticks.append(el("span", "", x))); tl.append(ticks);
+    tl.append(el("div", "tlnow", `Now ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).replace(" AM", "").replace(" PM", "")} · ${workLeftText()}`));
+    sToday.append(tl);
+    const hrs = el("div", "row wrap");
+    if (L.cap === 0 && offOn(today).length) hrs.innerHTML = `<b>Day off</b> — ${esc(offOn(today).map((m) => m.title).join(", "))}`;
+    else if (L.over) hrs.innerHTML = `<b>${esc(fmtHrs(L.total))}</b> on an 8 h day — over by ${esc(fmtHrs(L.total - L.cap))}`;
+    else hrs.innerHTML = `<b>${esc(fmtHrs(L.total))}</b> of 8 h booked · ${esc(fmtHrs(Math.max(0, L.free)))} free`;
+    hrs.title = `Work ${fmtHrs(L.work)} + meetings you attend ${fmtHrs(L.mtg)}`;
+    sToday.append(hrs);
+  }
+  const first = el("div", "row wrap"); first.innerHTML = `First: <b>${esc(nx ? nx.title : "—")}</b> · ${open.length} open`; sToday.append(first);
+
+  // 4. MEETINGS
+  if (showMeetings()) {
+    const ms = meetingsOn(today).filter((m) => !m.all_day).sort((a, b) => a.start_at.localeCompare(b.start_at));
+    const offs = offOn(today);
+    if (ms.length || offs.length) {
+      const sM = card(r, "Meetings", { sub: "from Outlook" });
+      offs.forEach((m) => { const row = el("div", "row wrap"); row.innerHTML = `◇ <b>${esc(m.title)}</b><i>day off</i>`; sM.append(row); });
+      ms.forEach((m) => {
+        const row = el("div", "row link");
+        row.innerHTML = `${m.attending ? "■" : "◌"} ${esc(fmtTime(m.start_at))}–${esc(fmtTime(m.end_at))} &nbsp;${esc(m.title)}<i>${m.attending ? "you go" : "invited"}</i>`;
+        row.title = m.attending ? "Counts against your day. Open the day to change." : "Not counted. Open the day to say you go.";
+        row.addEventListener("click", () => openDay(today));
+        sM.append(row);
+      });
+    }
   }
 
-  // This week counts
-  const ws = iso(weekStart(new Date())), we = iso(addDays(weekStart(new Date()), 6));
-  const wk = state.tasks.filter((t) => visible(t) && t.scheduled_date && t.scheduled_date >= ws && t.scheduled_date <= we);
-  const n = (p) => wk.filter((t) => t.priority === p).length;
-  const promises = wk.filter((t) => t.promised_to).length;
-  r.append(el("h3", "", "This week"));
-  const c = el("div", "counts");
-  c.innerHTML = `${n("urgent")} urgent · ${n("high")} high · ${n("normal")} normal · ${n("low")} low<br>${promises} promise${promises === 1 ? "" : "s"} to people`;
-  r.append(c);
+  // 5. PROMISES
+  const owe = state.tasks.filter((t) => visible(t) && t.status !== "done" && t.promised_to)
+    .sort((a, b) => String(a.dropdead_date || a.target_date || a.scheduled_date || "9") .localeCompare(String(b.dropdead_date || b.target_date || b.scheduled_date || "9")));
+  const owed = state.tasks.filter((t) => visible(t) && t.status === "waiting");
+  if (owe.length || owed.length) {
+    const sP = card(r, "Promises");
+    owe.slice(0, 5).forEach((t) => {
+      const row = el("div", "row pr link");
+      const d = t.dropdead_date || t.target_date || t.scheduled_date;
+      row.append(el("span", "arr", "→"), el("span", "who", `You owe ${t.promised_to}`), el("span", "what", t.title), el("span", "when", d ? fmtShort(d).replace(",", "") : "no date"));
+      row.title = tooltip(t);
+      row.addEventListener("click", () => t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
+      sP.append(row);
+    });
+    owed.slice(0, 5).forEach((t) => {
+      const row = el("div", "row pr in link");
+      const days = Math.max(0, Math.round((Date.now() - new Date(t.updated_at || t.created_at)) / 86400000));
+      row.append(el("span", "arr", "←"), el("span", "who", `${t.waiting_on || "Someone"} owes you`), el("span", "what", t.title), el("span", "when", `${days} d`));
+      row.title = tooltip(t);
+      row.addEventListener("click", () => t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
+      sP.append(row);
+    });
+  }
 
-  // Unscheduled
-  const un = unscheduled();
-  const h3 = el("h3"); h3.append("Unscheduled", el("span", "muted", String(un.length)));
-  r.append(h3);
-  const b3 = el("div", "mini");
-  un.slice(0, 6).forEach((t) => b3.append(miniRow(t)));
-  if (un.length > 6) { const more = el("button", "btn sm", `See all ${un.length}`); more.addEventListener("click", () => openUnscheduled()); b3.append(more); }
-  if (!un.length) b3.append(el("div", "empty", "Nothing waiting to be scheduled."));
-  r.append(b3);
-
+  // 6. TASKS (today)
+  const sT = card(r, `Tasks · ${open.length}`, { sub: todayItems.length - open.length ? `${todayItems.length - open.length} done` : "" });
+  todayItems.forEach((t) => rowFor(sT, t));
+  if (!todayItems.length) sT.append(el("div", "empty", "Nothing scheduled today."));
   const sd = el("label", "hint");
   const cb = el("input"); cb.type = "checkbox"; cb.checked = state.showDone;
   cb.addEventListener("change", () => { state.showDone = cb.checked; render(); });
   sd.append(cb, " Show done items");
-  r.append(sd);
-  if (state.meetingsSync) r.append(el("div", "hint", `Outlook meetings checked ${new Date(state.meetingsSync).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} · every 15 min`));
+  sT.append(sd);
+  if (state.meetingsSync) sT.append(el("div", "hint", `Outlook checked ${new Date(state.meetingsSync).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} · every 15 min`));
+
+  // 7. QUICK LOOK
+  const sQ = card(r, "Quick look");
+  const d = new Date();
+  const ql = el("div", "ql");
+  const r1 = el("div", "r");
+  r1.append(el("span", "huge", d.toLocaleDateString("en-US", { month: "short" }).toUpperCase()), el("span", "huge", String(d.getDate())));
+  const r2 = el("div", "r r2");
+  r2.append(el("span", "dowl", d.toLocaleDateString("en-US", { weekday: "long" }).toUpperCase()), el("span", "yr", String(d.getFullYear())));
+  const wk = rowWeek(weekStart(d)), wks = weeksInYear(d.getFullYear());
+  const bar = el("div", "bar"); const fill = el("i"); fill.style.width = Math.round(wk / wks * 100) + "%"; bar.append(fill);
+  const lab = el("div", "barlab"); lab.append(el("span", "", `WEEK ${wk} OF ${wks}`), el("span", "", `${wks - wk} LEFT`));
+  const jan1 = new Date(d.getFullYear(), 0, 1), dec31 = new Date(d.getFullYear(), 11, 31);
+  const doy = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - jan1) / 86400000) + 1;
+  const left = Math.round((dec31 - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
+  const off = nextOff();
+  const strip = el("div", "strip");
+  const box = (n, l, title) => { const b = el("div", "box"); b.append(el("b", "", String(n)), el("small", "", l)); if (title) b.title = title; return b; };
+  strip.append(box(doy, "DAY OF YR"), box(left, "DAYS LEFT"), off ? box(off.days, "TO " + off.label, off.title) : box("—", "NEXT OFF", "No holiday or PTO on the calendar yet"));
+  ql.append(r1, r2, bar, lab, strip);
+  sQ.append(ql);
+}
+
+// next day off on the calendar (PTO or company holiday), for the Quick look box
+function nextOff() {
+  const today = todayISO();
+  const rows = state.meetings.filter((m) => isOff(m) && m.day > today).sort((a, b) => a.day.localeCompare(b.day));
+  if (!rows.length) return null;
+  const m = rows[0];
+  const label = (m.title.split("—").pop() || m.title).trim().replace(/^(PTO|PCG holiday)\s*/i, "").toUpperCase().slice(0, 12);
+  return { days: daysBetween(today, m.day), label: label || "OFF", title: `${m.title} · ${fmtShort(m.day)}` };
 }
 
 function panelHeader(r, title, sub) {
-  const h = el("h3"); h.append(title);
-  if (sub) h.append(el("span", "muted", sub));
-  const x = el("button", "btn ghost sm close", "✕"); x.title = "Close (Esc)";
+  const s = card(r, title, { sub });
+  const x = el("button", "btn ghost sm close", "✕ Close"); x.title = "Close (Esc)";
   x.addEventListener("click", closePanel);
-  h.append(x);
-  r.append(h);
+  s.querySelector(".lab").append(x);
+  s.classList.add("head");
+  return s;
 }
 
 function renderDayPanel(r) {
   const d = state.selected;
   const items = tasksOn(d);
   panelHeader(r, fmtLong(d), `${items.length} item${items.length === 1 ? "" : "s"}`);
-  if (showMeetings()) { r.append(loadLine(d)); meetingsSection(r, d); if (meetingsOn(d).length) r.append(el("h3", "", "Tasks")); }
-  if (!items.length) r.append(el("div", "empty", "Nothing here yet. Quick add puts new things on this day."));
-  items.forEach((t) => r.append(itemCard(t)));
+  if (showMeetings() && !isWeekend(d)) {
+    const sH = card(r, "Hours"); sH.append(loadLine(d));
+    const ms = meetingsOn(d);
+    if (ms.length) {
+      const sM = card(r, "Meetings", { sub: "from your PCI Outlook" });
+      const box = el("div", "mtgs");
+      ms.sort((a, b) => (a.all_day === b.all_day ? a.start_at.localeCompare(b.start_at) : a.all_day ? -1 : 1)).forEach((m) => box.append(meetingCard(m)));
+      sM.append(box);
+    }
+  }
+  const sT = card(r, "Tasks", { sub: "click one for detail" });
+  if (!items.length) sT.append(el("div", "empty", "Nothing here yet. Quick add puts new things on this day."));
+  items.forEach((t) => sT.append(itemCard(t)));
   // coming up (next 5 days)
   const soon = [];
   for (let i = 1; i <= 5; i++) { const dd = iso(addDays(fromISO(d), i)); tasksOn(dd).forEach((t) => soon.push(t)); }
   if (soon.length) {
-    r.append(el("h3", "", "Coming up"));
-    const c = el("div", "counts");
-    c.innerHTML = soon.slice(0, 8).map((t) => `${esc(fmtShort(t.scheduled_date).split(" ")[0])} ${esc(PRI[t.priority].mark)} ${esc(t.title)}`).join("<br>");
-    r.append(c);
+    const sC = card(r, "Coming up", { sub: "next 5 days" });
+    soon.slice(0, 8).forEach((t) => rowFor(sC, t, { when: fmtShort(t.scheduled_date).split(",")[0] }));
   }
 }
 
 function renderUnscheduledPanel(r) {
   const items = unscheduled();
-  panelHeader(r, "Unscheduled", String(items.length));
-  r.append(el("div", "hint", "Give each one a day: open it and set Scheduled, or drag its chip onto the calendar from the day panel."));
-  items.forEach((t) => r.append(itemCard(t)));
+  panelHeader(r, "Inbox · unscheduled", String(items.length));
+  const sT = card(r, "Give each one a day", { sub: "open it and set Scheduled" });
+  if (!items.length) sT.append(el("div", "empty", "Nothing waiting to be scheduled."));
+  items.forEach((t) => sT.append(itemCard(t)));
 }
 
 function renderTomorrowPanel(r) {
   const tmr = iso(addDays(new Date(), 1));
   panelHeader(r, "Tomorrow", fmtShort(tmr));
+  const sW = card(r, "What do you want to work on?", { sub: "one per line" });
   const wrap = el("div", "tomorrow");
-  wrap.append(el("div", "hint", "What do you want to work on tomorrow? One per line. They land as Planned (dashed) on tomorrow; the 5:30 a.m. plan builds the day around them."));
+  wrap.append(el("div", "hint", "They land as Planned (dashed) on tomorrow; the 5:30 a.m. plan builds the day around them."));
   const ta = el("textarea"); ta.placeholder = "Miner L2 leave-outs\nC1 DWG export\n…";
   const taWrap = el("div", "ta-wrap"); taWrap.append(ta);
   const mic = el("button", "mic"); mic.type = "button"; mic.title = "Speak it"; mic.setAttribute("aria-label", "Speak tomorrow's list");
@@ -701,7 +1001,7 @@ function renderTomorrowPanel(r) {
   taWrap.append(mic);
   wrap.append(taWrap);
   const act = el("div", "actions");
-  const plan = el("button", "btn primary", "Plan it with Foreman");
+  const plan = el("button", "btn primary", "Plan it with Assistant");
   plan.addEventListener("click", () => {
     const v = ta.value.trim(); if (!v) return;
     ta.value = "";
@@ -720,12 +1020,12 @@ function renderTomorrowPanel(r) {
   });
   act.append(plan, save);
   wrap.append(act);
-  r.append(wrap);
+  sW.append(wrap);
 
   const existing = tasksOn(tmr);
-  r.append(el("h3", "", "Already on tomorrow"));
-  if (!existing.length) r.append(el("div", "empty", "Nothing yet."));
-  existing.forEach((t) => r.append(itemCard(t)));
+  const sE = card(r, "Already on tomorrow", { sub: String(existing.length) });
+  if (!existing.length) sE.append(el("div", "empty", "Nothing yet."));
+  existing.forEach((t) => sE.append(itemCard(t)));
 }
 
 // ---------- item card ----------
@@ -738,7 +1038,9 @@ function itemCard(t) {
   const s = statusLine(t);
   const st = el("span", `status-pill ${s.cls}`, s.text);
   const caret = el("span", "caret", state.openId === t.id ? "▴" : "▾");
-  head.append(chip, title, st, caret);
+  head.append(chip, title);
+  if (!t.confirmed && t.status !== "done") { const q = el("span", "status-pill q", "? size"); q.title = "Size and priority were guessed"; head.append(q); }
+  head.append(st, caret);
   head.addEventListener("click", () => { state.openId = state.openId === t.id ? null : t.id; state.editId = null; render(); });
   card.append(head);
 
@@ -761,12 +1063,13 @@ function itemCard(t) {
 
       const a = el("div", "actions");
       const btn = (label, fn, cls = "btn sm") => { const b = el("button", cls, label); b.addEventListener("click", fn); return b; };
-      if (t.status !== "done") a.append(btn("✓ Done", () => saveTask(t.id, { status: "done", done_at: new Date().toISOString() })));
+      if (t.status !== "done") a.append(btn("✓ Done", () => saveTask(t.id, { status: "done", done_at: new Date().toISOString() }), "btn sm olive"));
       else a.append(btn("Reopen", () => saveTask(t.id, { status: "not_started", done_at: null })));
       if (t.status === "not_started" || t.status === "waiting") a.append(btn("Working", () => saveTask(t.id, { status: "working" })));
       if (t.planned) a.append(btn("Make it real", () => saveTask(t.id, { planned: false })));
-      a.append(btn("Tomorrow", () => saveTask(t.id, { scheduled_date: iso(addDays(new Date(), 1)) })));
-      a.append(btn("+1 wk", () => saveTask(t.id, { scheduled_date: iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)) })));
+      if (!t.confirmed && t.status !== "done") { const q = btn("? Set size + priority", null, "btn sm"); q.addEventListener("click", () => openQuickFix(t, q)); a.append(q); }
+      a.append(btn("Tomorrow", () => moveTask(t, iso(addDays(new Date(), 1)), "Moved to tomorrow from the panel")));
+      a.append(btn("+1 wk", () => moveTask(t, iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)), "Pushed a week from the panel")));
       a.append(btn("Edit", () => { state.editId = t.id; render(); }));
       a.append(btn("Delete", async () => { if (confirm(`Delete "${t.title}"?`)) await deleteTask(t.id); }, "btn sm danger"));
       card.append(a);
@@ -820,6 +1123,7 @@ function editForm(t) {
     if (patch.status === "done" && !t.done_at) patch.done_at = new Date().toISOString();
     if (patch.status !== "done") patch.done_at = null;
     if (patch.scheduled_date) patch.planned = t.planned && patch.scheduled_date === t.scheduled_date ? t.planned : false;
+    if (patch.size) patch.confirmed = true;   // Adam set it himself — the "?" comes off
     state.editId = null;
     if (await saveTask(t.id, patch)) toast("Saved");
   });
@@ -871,7 +1175,7 @@ async function quickAdd(text) {
   const row = { title: p.title, priority: p.priority, bucket: p.bucket || (state.bucket === "both" ? "work" : state.bucket), job: p.job, scheduled_date: date, source: "quick" };
   const t = await insertTask(row);
   if (!t) return;
-  toast(`Added to ${fmtShort(date)} — set target and drop-dead if it has them`);
+  toast(`Added to ${fmtShort(date)} — set size, target and drop-dead if it has them`);
   // open it in edit mode so target / drop-dead get asked right away
   state.selected = date; state.panel = "day"; state.openId = t.id; state.editId = t.id;
   render();
@@ -897,9 +1201,22 @@ function attachMic(btn, onFinal, onInterim) {
 }
 
 function initMic() {
-  // the mic goes straight to Foreman's brain: brain-dump, it sorts it out
-  attachMic($("mic-btn"), (v) => { $("quick-input").value = ""; askBrain(v); }, (v) => { $("quick-input").value = v; });
-  $("tell-btn").addEventListener("click", () => { const v = $("quick-input").value.trim(); if (!v) { $("quick-input").focus(); return; } $("quick-input").value = ""; askBrain(v); });
+  // one button: typed text in the box → send it to AP; empty box → press and talk (press again to stop)
+  const btn = $("tell-btn"), inp = $("quick-input");
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let rec = null, heard = "";
+  btn.addEventListener("click", () => {
+    if (rec) { rec.stop(); return; }
+    const v = inp.value.trim();
+    if (v) { inp.value = ""; askBrain(v); return; }
+    if (!SR) { toast("Voice needs Chrome or Edge — type it instead"); inp.focus(); return; }
+    rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; heard = "";
+    btn.classList.add("listening"); inp.placeholder = "Listening… press Tell Assistant again to stop";
+    rec.onresult = (e) => { heard = Array.from(e.results).map((r) => r[0].transcript).join(""); inp.value = heard; };
+    rec.onend = () => { btn.classList.remove("listening"); inp.placeholder = "Quick add (Enter) or tell your assistant anything…"; rec = null; const t = heard.trim(); if (t) { inp.value = ""; askBrain(t); } };
+    rec.onerror = () => { btn.classList.remove("listening"); rec = null; };
+    rec.start();
+  });
 }
 
 // ---------- full screen ----------
@@ -924,7 +1241,7 @@ if (MINI_ONLY) document.body.classList.add("mini-only");
 // ---- install (own window) ----
 let installEvt = null;
 window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installEvt = e; $("install-btn").classList.remove("hidden"); });
-window.addEventListener("appinstalled", () => { installEvt = null; $("install-btn").classList.add("hidden"); toast("Installed — open Foreman from your Start menu or taskbar"); });
+window.addEventListener("appinstalled", () => { installEvt = null; $("install-btn").classList.add("hidden"); toast("Installed — open AP Personal Assistant from your Start menu or taskbar"); });
 function initInstall() {
   $("install-btn").addEventListener("click", async () => {
     if (!installEvt) return;
@@ -945,7 +1262,7 @@ function updateBadge() {
   (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
 }
 
-// ---- pop-up alerts (while a Foreman window is open, even minimized) ----
+// ---- pop-up alerts (while an AP window is open, even minimized) ----
 const alertsOn = () => ("Notification" in window) && Notification.permission === "granted" && localStorage.getItem("fm.alerts") !== "off";
 function syncAlertsBtn() {
   const b = $("alerts-btn"); if (!b) return;
@@ -990,7 +1307,7 @@ function initAlerts() {
     if (Notification.permission !== "granted") {
       const r = await Notification.requestPermission();
       if (r !== "granted") { syncAlertsBtn(); return; }
-      localStorage.setItem("fm.alerts", "on"); syncAlertsBtn(); notify("Foreman alerts are on", "Meetings 15 min ahead, nags, drop-deads.", "hello"); return;
+      localStorage.setItem("fm.alerts", "on"); syncAlertsBtn(); notify("AP alerts are on", "Meetings 15 min ahead, nags, drop-deads.", "hello"); return;
     }
     localStorage.setItem("fm.alerts", alertsOn() ? "off" : "on"); syncAlertsBtn();
     toast(alertsOn() ? "Alerts on" : "Alerts off");
@@ -1044,7 +1361,7 @@ async function openMini() {
       return;
     } catch { miniWin = null; }
   }
-  // Fallback: a small popup running Foreman in mini-only mode (not always-on-top)
+  // Fallback: a small popup running AP in mini-only mode (not always-on-top)
   miniWin = window.open(location.pathname + "?mini=1", "fm-mini", "popup,width=360,height=460");
 }
 function initMini() { const b = $("mini-btn"); if (b) b.addEventListener("click", openMini); }
@@ -1069,6 +1386,10 @@ function wire() {
   $("next-btn").addEventListener("click", () => shift(1));
   $("today-btn").addEventListener("click", () => { state.cursor = new Date(); state.mJump = iso(firstOfMonth(state.cursor)); render(); });
   $("tomorrow-btn").addEventListener("click", openTomorrow);
+  $("balance-btn").addEventListener("click", () => {
+    const s = weekStart(new Date()), mon = iso(addDays(s, 1)), fri = iso(addDays(s, 5));
+    askBrain(`Balance this week (${mon} to ${fri}): apply the scheduling rules to Mon–Fri. Keep every day inside 8 hours counting meetings I attend and days off. Move overflow forward — low first, then normal, toward their targets, never past a drop-dead, never anything promised to someone. Urgent stays put. One-line reason on every move, and tell me what moved.`);
+  });
   $("quick-add").addEventListener("submit", async (e) => { e.preventDefault(); const v = $("quick-input").value.trim(); if (!v) return; $("quick-input").value = ""; await quickAdd(v); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { if (state.editId) { state.editId = null; render(); } else if (state.panel) closePanel(); }
@@ -1100,6 +1421,6 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (!hadController) { hadController = true; return; }       // first install, nothing to swap
     const go = () => { if (userIsTyping()) setTimeout(go, 3000); else location.reload(); };
-    toast("Foreman updated — refreshing"); setTimeout(go, 1200);
+    toast("AP updated — refreshing"); setTimeout(go, 1200);
   });
 }

@@ -3,18 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Foreman</title>
-  <meta name="theme-color" content="#ffffff">
+  <title>Personal Assistant</title>
+  <meta name="theme-color" content="#f3f3f1">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/app.css?v=31">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..900&family=Roboto+Condensed:wght@400;700&display=swap">
+  <link rel="stylesheet" href="css/app.css?v=32">
 </head>
 <body>
 
   <!-- LOGIN -->
   <section id="login-screen" class="login hidden">
     <form id="login-form" class="login-card">
-      <h1>Foreman</h1>
+      <h1>Personal Assistant</h1>
       <p class="sub">Your organizer. Private to you.</p>
       <label>Email <input id="login-email" type="email" autocomplete="username" required></label>
       <label>Password <input id="login-password" type="password" autocomplete="current-password" required></label>
@@ -26,7 +29,7 @@
   <!-- APP -->
   <div id="app" class="app hidden">
     <header class="topbar">
-      <span class="brand">Foreman</span>
+      <span class="plate" title="Personal Assistant"><span class="mono">AP</span><b>PERSONAL ASSISTANT</b></span>
 
       <div class="seg" id="bucket-seg" role="group" aria-label="Calendar">
         <button data-bucket="work" class="on">Work</button>
@@ -42,49 +45,49 @@
 
       <form id="quick-add" class="quick" autocomplete="off">
         <span class="plus" aria-hidden="true">+</span>
-        <input id="quick-input" type="text" placeholder="Quick add (Enter) or tell Foreman anything…">
-        <button type="button" id="tell-btn" class="btn sm" title="Send what you typed to Foreman to sort out">Tell Foreman</button>
-        <button type="button" id="mic-btn" class="mic" title="Speak it" aria-label="Speak a task"><svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg></button>
+        <input id="quick-input" type="text" placeholder="Quick add (Enter) or tell your assistant anything…">
       </form>
+      <button type="button" id="tell-btn" class="btn" title="Typed something? Sends it to your assistant to file. Empty box? Press and talk."><svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg><span>Tell Assistant</span></button>
 
       <button id="tomorrow-btn" class="btn">Tomorrow</button>
-      <button id="mini-btn" class="btn ghost" title="Small always-on-top window with today's list">▣ Mini</button>
-      <button id="alerts-btn" class="btn ghost" title="Desktop pop-ups for meetings and nags">Alerts: off</button>
-      <button id="install-btn" class="btn hidden" title="Run Foreman in its own window">⬇ Install app</button>
-      <button id="full-btn" class="btn ghost" title="Full screen">⛶ Full screen</button>
-      <button id="logout-btn" class="btn ghost" title="Sign out">Sign out</button>
-      <span class="ver" title="App version — tell Claude this number if colors look stale">v31</span>
+      <button id="mini-btn" class="btn" title="Small always-on-top window with today's list">Mini</button>
+      <button id="full-btn" class="btn" title="Full screen">Full screen</button>
+      <button id="alerts-btn" class="btn ghost sm" title="Desktop pop-ups for meetings and nags">Alerts: off</button>
+      <button id="install-btn" class="btn sm hidden" title="Run it in its own window">⬇ Install app</button>
+      <button id="logout-btn" class="btn ghost sm" title="Sign out">Sign out</button>
+      <span class="ver" title="App version — tell Claude this number if the look seems stale">v32</span>
     </header>
 
     <main class="layout" id="layout">
+      <aside class="panel" id="rail">
+        <div id="rail-body"></div>
+      </aside>
+
       <section class="cal" id="cal">
         <div class="cal-head">
-          <button id="prev-btn" class="btn" aria-label="Previous month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></svg></button>
-          <h2 id="cal-title">October 2026</h2>
-          <button id="next-btn" class="btn" aria-label="Next month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg></button>
+          <button id="prev-btn" class="btn" aria-label="Previous month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></svg></button>
+          <h2 id="cal-title">November 2026</h2>
+          <button id="next-btn" class="btn" aria-label="Next month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg></button>
           <button id="today-btn" class="btn">Today</button>
-          <span class="legend">
-            <span class="chip p-urgent">!! Urgent</span>
-            <span class="chip p-high">▲ High</span>
-            <span class="chip p-normal">● Normal</span>
-            <span class="chip p-low">– Low</span>
-            <span class="chip planned">Planned</span>
-            <span class="mtg going" title="Meeting you go to — counts against your 8 h day">■ Meeting (you go)</span>
-            <span class="mtg invited" title="Meeting you're invited to — not counted">◌ Invited</span>
+          <button id="balance-btn" class="btn" title="Apply the scheduling rules to this week: move overflow with reasons, keep promises and drop-deads. Undo in the panel.">⇄ Balance week</button>
+          <span class="legend" aria-label="Legend">
+            <span class="hl urg">!! Urgent</span>
+            <span class="hl high">▲ High</span>
+            <span class="hl norm">● Normal</span>
+            <span class="hl low">– Low</span>
+            <span class="hl plan">◇ Planned</span>
+            <span class="hl meet" title="Meeting you go to — counts against your 8 h day">■ Meeting</span>
+            <span class="hl off" title="Holiday or PTO — no work goes here">◇ Off</span>
           </span>
         </div>
         <div id="cal-body" class="cal-body"></div>
       </section>
-
-      <aside class="rail" id="rail">
-        <div id="rail-body"></div>
-      </aside>
     </main>
 
     <div id="mini-root" class="miniwin hidden"></div>
     <div id="toast" class="toast hidden"></div>
   </div>
 
-  <script type="module" src="js/app.js?v=31"></script>
+  <script type="module" src="js/app.js?v=32"></script>
 </body>
 </html>

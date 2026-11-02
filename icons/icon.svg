@@ -1,12 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#185fa5"/>
-  <rect x="12" y="16" width="40" height="36" rx="5" fill="#ffffff"/>
-  <rect x="12" y="16" width="40" height="10" rx="5" fill="#e6f1fb"/>
-  <rect x="12" y="22" width="40" height="4" fill="#e6f1fb"/>
-  <rect x="18" y="31" width="8" height="6" rx="1.5" fill="#e24b4a"/>
-  <rect x="28" y="31" width="8" height="6" rx="1.5" fill="#ef9f27"/>
-  <rect x="38" y="31" width="8" height="6" rx="1.5" fill="#378add"/>
-  <rect x="18" y="41" width="18" height="6" rx="1.5" fill="#b4b2a9"/>
-  <rect x="20" y="10" width="4" height="10" rx="2" fill="#0c447c"/>
-  <rect x="40" y="10" width="4" height="10" rx="2" fill="#0c447c"/>
+  <rect width="64" height="64" rx="14" fill="#f3f3f1"/>
+  <rect x="5" y="5" width="54" height="54" rx="11" fill="#ffffff" stroke="#222222" stroke-width="3"/>
+  <rect x="11" y="11" width="42" height="8" rx="2" fill="#efe3cc" stroke="#222222" stroke-width="1.5"/>
+  <text x="32" y="47" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="27" font-weight="900" fill="#8c1d2f" letter-spacing="1">AP</text>
+  <rect x="11" y="52" width="26" height="3" rx="1.5" fill="#d8222a"/>
 </svg>
