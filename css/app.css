@@ -307,12 +307,17 @@ b, strong { font-weight: 700; }
 .form textarea { min-height: 60px; resize: vertical; }
 .form .actions { grid-column: 1 / -1; }
 
-/* ---------- tomorrow / brain panels ---------- */
-.tomorrow { padding: 0 12px; }
-.tomorrow .ta-wrap { position: relative; }
-.tomorrow .ta-wrap .mic { position: absolute; right: 6px; bottom: 8px; }
-.tomorrow textarea { width: 100%; min-height: 110px; padding: 8px; border: 1px solid var(--rule); border-radius: 6px; }
-.tomorrow .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+/* ---------- add task / brain panels ---------- */
+.addp { padding: 0 12px; }
+.addp .ta-wrap { position: relative; }
+.addp .ta-wrap .mic { position: absolute; right: 6px; bottom: 8px; }
+.addp textarea { width: 100%; min-height: 96px; padding: 8px; border: 1px solid var(--rule); border-radius: 6px; }
+.picks { display: flex; gap: 5px; flex-wrap: wrap; margin: 0 12px 4px; align-items: center; }
+.picks .o { white-space: nowrap; border: 1px solid var(--rule); border-radius: 4px; padding: 4px 9px; background: #fff; font-weight: 600; cursor: pointer; font-size: 12px; box-shadow: var(--shadow); }
+.picks .o:hover { background: #f6f1e6; }
+.picks .o.on { background: var(--tan); box-shadow: inset 0 0 0 1.5px var(--rule); }
+.picks input.date { width: 128px; padding: 3px 6px; border-style: dashed; font-weight: 500; }
+.sec .actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 12px 6px; }
 .brain { display: flex; flex-direction: column; gap: 8px; margin: 0 12px 10px; }
 .bubble { border-radius: 6px; padding: 8px 10px; font-size: 14px; line-height: 1.5; border: 1px solid var(--rule); }
 .bubble.you { background: var(--tan); margin-left: 24px; }

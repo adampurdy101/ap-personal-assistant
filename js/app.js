@@ -56,7 +56,8 @@ const state = {
   meetings: [],                                          // PCI Outlook meetings (titles + times only)
   meetingsSync: null,
   showDone: false,
-  tomorrowDraft: "",                                     // Tomorrow panel text, kept across redraws
+  addDraft: "",                                          // Add task panel text, kept across redraws
+  addPick: null,                                         // Add task panel choices (day, priority, size, calendar)
 };
 
 function toast(msg) {
@@ -311,8 +312,8 @@ function renderTop() {
   document.querySelectorAll("#bucket-seg button").forEach((b) => b.classList.toggle("on", b.dataset.bucket === state.bucket));
   document.querySelectorAll("#view-seg button").forEach((b) => b.classList.toggle("on", b.dataset.view === state.view));
   const btn = $("tell-btn"), inp = $("quick-input");
-  if (btn) { btn.classList.toggle("listening", voice.on); const l = btn.querySelector("span"); if (l) l.textContent = voice.on ? "Listening… press to send" : "Tell Assistant"; }
-  if (inp) inp.placeholder = voice.on ? "Listening… say it at your pace" : "Quick add (Enter) or tell your assistant anything…";
+  if (btn) { btn.classList.toggle("listening", voice.on); const l = btn.querySelector("span"); if (l) l.textContent = voice.on ? "Listening… press to send" : "Assistant"; }
+  if (inp) inp.placeholder = voice.on ? "Listening… say it at your pace" : "Quick add (Enter) — or type anything and press Assistant";
 }
 
 function renderCalendar() {
@@ -626,7 +627,7 @@ function renderRail() {
   if (!state.panel) renderQuickLook(r);   // first thing in the general view only
   if (state.panel === "day" && state.selected) return renderDayPanel(r);
   if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
-  if (state.panel === "tomorrow") return renderTomorrowPanel(r);
+  if (state.panel === "add") return renderAddPanel(r);
   if (state.panel === "brain") return renderBrainPanel(r);
   renderSkinny(r);
 }
@@ -1022,47 +1023,106 @@ function renderUnscheduledPanel(r) {
   items.forEach((t) => sT.append(itemCard(t)));
 }
 
-function renderTomorrowPanel(r) {
-  const tmr = iso(addDays(new Date(), 1));
-  panelHeader(r, "Tomorrow", fmtShort(tmr));
+// ---------- Add task panel: what · when · priority · how long · which calendar ----------
+function addPick() {
+  if (!state.addPick) state.addPick = { date: todayISO(), priority: "normal", size: "1h", sizeSet: false, bucket: null };
+  return state.addPick;
+}
+function addBucket() { const k = addPick(); return k.bucket || (state.bucket === "both" ? "work" : state.bucket); }
+// the next few days he can land work on: today, tomorrow, then the rest of the week (work skips weekends + days off)
+function addDayChoices() {
+  const out = [], work = addBucket() === "work";
+  for (let i = 0; out.length < 6 && i < 14; i++) {
+    const d = addDays(new Date(), i), dISO = iso(d);
+    if (work && dayCapacity(dISO) === 0) continue;
+    out.push({ date: dISO, label: i === 0 ? "Today" : i === 1 ? "Tomorrow" : `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} ${d.getMonth() + 1}/${d.getDate()}` });
+  }
+  return out;
+}
+function renderAddPanel(r) {
+  const k = addPick();
+  panelHeader(r, "Add task", k.date ? fmtShort(k.date) : "no date yet");
+  const opt = (row, label, on, fn, title) => { const b = el("button", "o" + (on ? " on" : ""), label); b.type = "button"; if (title) b.title = title; b.addEventListener("click", () => { fn(); render({ now: true }); }); row.append(b); return b; };
+
+  // WHAT
   const sW = card(r, "What do you want to work on?", { sub: "one per line" });
-  const wrap = el("div", "tomorrow");
-  wrap.append(el("div", "hint", "They land as Planned (dashed) on tomorrow; the 5:30 a.m. plan builds the day around them."));
-  const ta = el("textarea"); ta.placeholder = voice.on && voice.key === "tomorrow" ? "Listening…" : "Miner L2 leave-outs\nC1 DWG export\n…";
-  ta.value = state.tomorrowDraft || "";
-  ta.addEventListener("input", () => { state.tomorrowDraft = ta.value; });
+  const wrap = el("div", "addp");
+  const ta = el("textarea"); ta.placeholder = voice.on && voice.key === "add" ? "Listening…" : "Miner L2 leave-outs\nC1 DWG export\n…";
+  ta.value = state.addDraft || "";
+  ta.addEventListener("input", () => { state.addDraft = ta.value; });
   const taWrap = el("div", "ta-wrap"); taWrap.append(ta);
-  const mic = el("button", "mic" + (voice.on && voice.key === "tomorrow" ? " listening" : "")); mic.type = "button"; mic.title = voice.on ? "Press to stop" : "Speak it"; mic.setAttribute("aria-label", "Speak tomorrow's list");
+  const mic = el("button", "mic" + (voice.on && voice.key === "add" ? " listening" : "")); mic.type = "button"; mic.title = voice.on ? "Press to stop" : "Speak it"; mic.setAttribute("aria-label", "Speak the list");
   mic.innerHTML = MIC_SVG;
-  mic.addEventListener("click", () => voiceToggle("tomorrow"));
+  mic.addEventListener("click", () => voiceToggle("add"));
   taWrap.append(mic);
   wrap.append(taWrap);
-  const act = el("div", "actions");
-  const plan = el("button", "btn primary", "Plan it with Assistant");
-  plan.addEventListener("click", () => {
-    const v = ta.value.trim(); if (!v) return;
-    ta.value = ""; state.tomorrowDraft = "";
-    askBrain(`Tomorrow (${tmr}) I want to work on: ${v}. Pencil these in on tomorrow as planned, and reshuffle anything else on tomorrow that no longer fits.`);
-  });
-  const save = el("button", "btn", "Just pencil in (no reshuffle)");
-  save.addEventListener("click", async () => {
-    const lines = ta.value.split("\n").map((s) => s.trim()).filter(Boolean);
-    if (!lines.length) return;
-    for (const line of lines) {
-      const p = parseQuick(line);
-      await insertTask({ title: p.title, priority: p.priority, bucket: p.bucket || (state.bucket === "both" ? "work" : state.bucket), scheduled_date: tmr, planned: true, job: p.job, source: "tomorrow" });
-    }
-    ta.value = ""; state.tomorrowDraft = "";
-    toast(`${lines.length} penciled in for tomorrow`);
-  });
-  act.append(plan, save);
-  wrap.append(act);
   sW.append(wrap);
 
-  const existing = tasksOn(tmr);
-  const sE = card(r, "Already on tomorrow", { sub: String(existing.length) });
-  if (!existing.length) sE.append(el("div", "empty", "Nothing yet."));
-  existing.forEach((t) => sE.append(itemCard(t)));
+  // WHEN
+  const sD = card(r, "When", { sub: k.date ? fmtLong(k.date) : "Inbox (no date)" });
+  const days = el("div", "picks");
+  addDayChoices().forEach((c) => opt(days, c.label, k.date === c.date, () => { k.date = c.date; }));
+  const pickD = el("input", "o date"); pickD.type = "date"; pickD.title = "Pick any date";
+  pickD.value = k.date && !addDayChoices().some((c) => c.date === k.date) ? k.date : "";
+  pickD.addEventListener("change", () => { if (pickD.value) { k.date = pickD.value; render({ now: true }); } });
+  days.append(pickD);
+  opt(days, "No date", !k.date, () => { k.date = null; }, "Goes to the Inbox; give it a day later");
+  sD.append(days);
+
+  // PRIORITY
+  const sP = card(r, "Priority");
+  const pr = el("div", "picks");
+  Object.entries(PRI).forEach(([v, d]) => opt(pr, `${d.mark} ${d.label}`, k.priority === v, () => { k.priority = v; }));
+  sP.append(pr);
+
+  // HOW LONG
+  const sS = card(r, "How long", { sub: k.sizeSet ? SIZE[k.size] : "1 hr is my guess until you pick" });
+  const sz = el("div", "picks");
+  [["15m", "15 m"], ["1h", "1 h"], ["half", "½ day"], ["full", "Full day"]].forEach(([v, txt]) => opt(sz, txt, k.sizeSet && k.size === v, () => { k.size = v; k.sizeSet = true; }));
+  sS.append(sz);
+
+  // CALENDAR
+  const sB = card(r, "Calendar");
+  const bk = el("div", "picks");
+  opt(bk, "Work", addBucket() === "work", () => { k.bucket = "work"; });
+  opt(bk, "Home", addBucket() === "home", () => { k.bucket = "home"; });
+  sB.append(bk);
+
+  // GO
+  const act = el("div", "actions");
+  const lines = () => (state.addDraft || "").split("\n").map((x) => x.trim()).filter(Boolean);
+  const plan = el("button", "btn primary", "Plan it with Assistant");
+  plan.title = "AP files these and reshuffles the day around them";
+  plan.addEventListener("click", () => {
+    const v = lines(); if (!v.length) { toast("Type or say what to add first"); return; }
+    const where = k.date ? `on ${fmtLong(k.date)} (${k.date})` : "in the inbox (no date yet)";
+    const size = k.sizeSet ? SIZE[k.size] : "1 hr (my guess — leave it unconfirmed)";
+    state.addDraft = "";
+    askBrain(`Add to my ${addBucket()} calendar ${where}: ${v.join("; ")}. Priority ${PRI[k.priority].label}, size ${size}.${k.date ? " Pencil them in as planned and reshuffle anything else on that day that no longer fits." : ""}`);
+  });
+  const save = el("button", "btn", "Just add (no reshuffle)");
+  save.addEventListener("click", async () => {
+    const v = lines(); if (!v.length) { toast("Type or say what to add first"); return; }
+    let n = 0;
+    for (const line of v) {
+      const p = parseQuick(line);
+      const row = { title: p.title, priority: p.priority !== "normal" ? p.priority : k.priority, bucket: p.bucket || addBucket(), scheduled_date: p.date || k.date, size: k.size, confirmed: k.sizeSet, planned: true, job: p.job, source: "add" };
+      if (await insertTask(row)) n++;
+    }
+    state.addDraft = "";
+    toast(`${n} added ${k.date ? "to " + fmtShort(k.date) : "to the Inbox"}`);
+    render({ now: true });
+  });
+  act.append(plan, save);
+  const go = card(r, "Go");
+  go.append(act);
+
+  if (k.date) {
+    const existing = tasksOn(k.date);
+    const sE = card(r, `Already on ${fmtShort(k.date)}`, { sub: String(existing.length) });
+    if (!existing.length) sE.append(el("div", "empty", "Nothing yet."));
+    existing.forEach((t) => sE.append(itemCard(t)));
+  }
 }
 
 // ---------- item card ----------
@@ -1174,7 +1234,7 @@ function openDay(dateISO, taskId = null) {
   render();
 }
 function openUnscheduled(taskId = null) { state.panel = "unscheduled"; state.openId = taskId; state.editId = null; render(); }
-function openTomorrow() { state.panel = "tomorrow"; state.openId = null; state.editId = null; render({ now: true }); }
+function openAdd() { state.panel = "add"; state.openId = null; state.editId = null; render({ now: true }); }
 function closePanel() { state.panel = null; state.openId = null; state.editId = null; render({ now: true }); }
 
 // ---------- quick add parsing ----------
@@ -1232,7 +1292,7 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const voice = { rec: null, on: false, key: null, finalText: "", interim: "", silence: null, stopTimer: null, restarts: 0 };
 const voiceText = () => (voice.finalText + " " + voice.interim).replace(/\s+/g, " ").trim();
 // Where the words go when he's done. quick (top bar) and brain (panel mic) are the
-// same conversation; tomorrow lands in that panel's list.
+// same conversation; add lands in the Add task panel's list.
 const toAssistant = {
   seed: () => ($("quick-input")?.value || document.querySelector(".brain-input")?.value || "").trim(),
   live: (v) => { const i = $("quick-input"); if (i) i.value = v; liveBubble(v); },
@@ -1241,10 +1301,10 @@ const toAssistant = {
 const VOICE_TARGETS = {
   quick: toAssistant,
   brain: toAssistant,
-  tomorrow: {
+  add: {
     seed: () => "",
-    live: (v) => { const t = document.querySelector(".tomorrow textarea"); if (t) t.placeholder = v || "Listening…"; },
-    done: (v) => { const d = (state.tomorrowDraft || "").replace(/\s*$/, ""); state.tomorrowDraft = (d ? d + "\n" : "") + v; },
+    live: (v) => { const t = document.querySelector(".addp textarea"); if (t) t.placeholder = v || "Listening…"; },
+    done: (v) => { const d = (state.addDraft || "").replace(/\s*$/, ""); state.addDraft = (d ? d + "\n" : "") + v; },
   },
 };
 function liveBubble(v) { const b = document.querySelector("#live-bubble .txt"); if (b) b.textContent = v || "…"; }
@@ -1499,7 +1559,7 @@ function wire() {
   $("prev-btn").addEventListener("click", () => shift(-1));
   $("next-btn").addEventListener("click", () => shift(1));
   $("today-btn").addEventListener("click", () => { state.cursor = new Date(); state.mJump = iso(firstOfMonth(state.cursor)); render(); });
-  $("tomorrow-btn").addEventListener("click", openTomorrow);
+  $("add-btn").addEventListener("click", openAdd);
   $("balance-btn").addEventListener("click", () => {
     const s = weekStart(new Date()), mon = iso(addDays(s, 1)), fri = iso(addDays(s, 5));
     askBrain(`Balance this week (${mon} to ${fri}): apply the scheduling rules to Mon–Fri. Keep every day inside 8 hours counting meetings I attend and days off. Move overflow forward — low first, then normal, toward their targets, never past a drop-dead, never anything promised to someone. Urgent stays put. One-line reason on every move, and tell me what moved.`);
