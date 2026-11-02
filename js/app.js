@@ -161,7 +161,9 @@ const meetingsOn = (dISO) => showMeetings() ? state.meetings.filter((m) => m.day
 const timedOn = (dISO) => meetingsOn(dISO).filter((m) => !m.all_day);
 const allDayOn = (dISO) => meetingsOn(dISO).filter((m) => m.all_day);
 const isOff = (m) => m.all_day && OFF_SOURCES.has(m.source);
-const isHoliday = (m) => /holiday/i.test(m.source || "") || /holiday/i.test(m.title || "");
+// a holiday row: PCG days off, plus the standard ones Outlook puts on the calendar (not days off)
+const HOLIDAY_RE = /holiday|new year|martin luther|mlk|presidents|memorial day|juneteenth|independence day|labor day|columbus|indigenous|veterans|thanksgiving|christmas|halloween|valentine|st\.? patrick|easter|mother'?s day|father'?s day|election day|good friday|flag day|cinco de mayo|groundhog|daylight saving/i;
+const isHoliday = (m) => m.all_day && (/holiday/i.test(m.source || "") || HOLIDAY_RE.test(m.title || ""));
 const offOn = (dISO) => state.meetings.filter((m) => m.day === dISO && isOff(m));
 const isWeekend = (dISO) => { const d = fromISO(dISO).getDay(); return d === 0 || d === 6; };
 const dayCapacity = (dISO) => (isWeekend(dISO) || offOn(dISO).length) ? 0 : DAY_HRS;
@@ -230,7 +232,7 @@ async function setAttending(m, attending) {
 }
 function meetingLine(m, { compact = false } = {}) {
   const off = isOff(m);
-  const cls = "mtg " + (off ? "allday off" + (isHoliday(m) ? " holiday" : "") : m.all_day ? "allday" : m.attending ? "going" : "invited");
+  const cls = "mtg " + (off ? "allday off" : m.all_day ? "allday" : m.attending ? "going" : "invited") + (isHoliday(m) ? " holiday" : "");
   const mark = m.all_day ? "◇" : m.attending ? "■" : "◌";
   const when = m.all_day ? (off ? "Day off" : "All day") : `${fmtTime(m.start_at)}–${fmtTime(m.end_at)}`;
   const n = el("div", cls);

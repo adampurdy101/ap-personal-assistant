@@ -16,6 +16,7 @@
   --normal-bg: #fff;    --normal-ink: #111; --normal-line: #222;
   --low-bg: #fff;       --low-ink: #555;    --low-line: #777;
   --home-line: #2a4a8a;
+  --holiday-bg: #e3c45a; --holiday-ink: #111; --holiday-line: #8a6d12;   /* Gold — Adam's pick (Nov 2); #18 Orange #d9731a parked for later */
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--page); color: var(--ink);
@@ -334,6 +335,7 @@ b, strong { font-weight: 700; }
 .dp-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
 /* holidays get their own look (Adam picks the color); still ◇ + wording, never color alone */
 .mtg.off.holiday { background: var(--holiday-bg, #fff); color: var(--holiday-ink, var(--ink)); border-color: var(--holiday-line, var(--rule)); }
+.mtg.allday.holiday:not(.off) { background: var(--holiday-bg, transparent); color: var(--holiday-ink, var(--ink)); border: 1px dashed var(--holiday-line, #777); font-style: normal; font-weight: 600; }
 .row.holiday { background: var(--holiday-bg, transparent); color: var(--holiday-ink, var(--ink)); border-radius: 4px; padding-left: 6px; }
 .sec .actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 12px 6px; }
 .brain { display: flex; flex-direction: column; gap: 8px; margin: 0 12px 10px; }
