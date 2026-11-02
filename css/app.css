@@ -223,6 +223,8 @@ b, strong { font-weight: 700; }
 .sec .status.ok { color: #3c5a1e; }
 .sec .hint { margin: 4px 12px 0; }
 .sec.focus { border: 2px solid var(--rule); background: #fff7f0; }
+.sec.ql-card { position: sticky; top: 0; z-index: 5; margin-top: 2px; box-shadow: 1px 1px 0 rgba(0,0,0,.18), 0 6px 8px -6px rgba(0,0,0,.25); }
+.panel { padding-top: 3px; }
 .sec.focus .lab { background: var(--red); color: #fff; }
 .sec .body { padding: 0 12px; }
 .empty { color: var(--ink-3); font-size: 13px; padding: 4px 12px 6px; }

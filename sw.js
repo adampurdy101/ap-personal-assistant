@@ -1,5 +1,5 @@
 // AP Personal Assistant service worker — network-first for app files, so updates land fast.
-const VERSION = "ap-v33";
+const VERSION = "ap-v34";
 const SHELL = ["./", "./index.html", "./css/app.css", "./js/app.js", "./js/auth.js", "./js/config.js", "./js/supabase.js", "./manifest.webmanifest", "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {

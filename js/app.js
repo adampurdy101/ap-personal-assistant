@@ -617,6 +617,7 @@ function renderDay(body) {
 function renderRail() {
   const r = $("rail-body");
   r.innerHTML = "";
+  renderQuickLook(r);   // always first, always visible
   if (state.panel === "day" && state.selected) return renderDayPanel(r);
   if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
   if (state.panel === "tomorrow") return renderTomorrowPanel(r);
@@ -912,8 +913,12 @@ function renderSkinny(r) {
   sT.append(sd);
   if (state.meetingsSync) sT.append(el("div", "hint", `Outlook checked ${new Date(state.meetingsSync).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} · every 15 min`));
 
-  // 7. QUICK LOOK
-  const sQ = card(r, "Quick look");
+
+}
+
+// QUICK LOOK — the date, the week, the countdown. Pinned at the top of the panel.
+function renderQuickLook(r) {
+  const sQ = card(r, "Quick look", { cls: "ql-card" });
   const d = new Date();
   const ql = el("div", "ql");
   const r1 = el("div", "r");
@@ -1184,39 +1189,57 @@ async function quickAdd(text) {
 // ---------- voice (Web Speech API) ----------
 const MIC_SVG = '<svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>';
 
-// attach push-to-talk to a button; onFinal(text) fires once when listening stops
-function attachMic(btn, onFinal, onInterim) {
+// Listening that gives him room to think: continuous mode, restarts itself when the
+// browser stops on a pause, and only finishes when he presses the button again or
+// goes quiet for SILENCE_MS after saying something. onInterim(text) keeps the box live.
+const SILENCE_MS = 12000;
+function attachMic(btn, onFinal, onInterim, { seed = () => "" } = {}) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { btn.title = "Voice needs Chrome or Edge"; btn.disabled = true; return; }
-  let rec = null, heard = "";
-  btn.addEventListener("click", () => {
-    if (rec) { rec.stop(); return; }
-    rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; heard = "";
-    btn.classList.add("listening");
-    rec.onresult = (e) => { heard = Array.from(e.results).map((r) => r[0].transcript).join(""); if (onInterim) onInterim(heard); };
-    rec.onend = () => { btn.classList.remove("listening"); rec = null; const v = heard.trim(); if (v) onFinal(v); };
-    rec.onerror = () => { btn.classList.remove("listening"); rec = null; };
+  let rec = null, listening = false, finalText = "", interim = "", silence = null;
+  const text = () => (finalText + " " + interim).replace(/\s+/g, " ").trim();
+  const bump = () => { clearTimeout(silence); silence = setTimeout(() => { if (listening && finalText.trim()) stop(); }, SILENCE_MS); };
+  const finish = () => {
+    clearTimeout(silence); btn.classList.remove("listening"); rec = null;
+    const v = text(); finalText = ""; interim = "";
+    if (v) onFinal(v);
+  };
+  const stop = () => { listening = false; if (rec) { try { rec.stop(); } catch { finish(); } } else finish(); };
+  const start = () => {
+    rec = new SR(); rec.lang = "en-US"; rec.continuous = true; rec.interimResults = true;
+    rec.onresult = (e) => {
+      let fin = "", int = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) { const r = e.results[i]; if (r.isFinal) fin += r[0].transcript + " "; else int += r[0].transcript; }
+      if (fin) finalText = (finalText + " " + fin).replace(/\s+/g, " ");
+      interim = int;
+      if (onInterim) onInterim(text());
+      bump();
+    };
+    rec.onend = () => { if (listening) { try { start(); } catch { finish(); } } else finish(); };
+    rec.onerror = (e) => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { listening = false; toast("Mic blocked — click the lock icon by the address bar → Microphone → Allow"); finish(); } };
     rec.start();
+  };
+  btn.addEventListener("click", () => {
+    if (listening) { stop(); return; }
+    listening = true; finalText = (seed() || "").trim(); interim = "";
+    btn.classList.add("listening");
+    toast("Listening — talk, pause, think. Press the button again when you're done.");
+    start(); bump();
   });
+  return { stop, isListening: () => listening };
 }
 
 function initMic() {
-  // one button: typed text in the box → send it to AP; empty box → press and talk (press again to stop)
+  // one button: typed text in the box → send it to AP; empty box → press and talk, press again to send
   const btn = $("tell-btn"), inp = $("quick-input");
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let rec = null, heard = "";
-  btn.addEventListener("click", () => {
-    if (rec) { rec.stop(); return; }
+  const PH = inp.placeholder;
+  const mic = attachMic(btn, (v) => { inp.value = ""; inp.placeholder = PH; askBrain(v); }, (v) => { inp.value = v; inp.placeholder = "Listening… press Tell Assistant again to send"; }, { seed: () => inp.value });
+  // typed text goes straight out (capture phase runs before attachMic's handler, which would otherwise start the mic)
+  btn.addEventListener("click", (e) => {
     const v = inp.value.trim();
-    if (v) { inp.value = ""; askBrain(v); return; }
-    if (!SR) { toast("Voice needs Chrome or Edge — type it instead"); inp.focus(); return; }
-    rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; heard = "";
-    btn.classList.add("listening"); inp.placeholder = "Listening… press Tell Assistant again to stop";
-    rec.onresult = (e) => { heard = Array.from(e.results).map((r) => r[0].transcript).join(""); inp.value = heard; };
-    rec.onend = () => { btn.classList.remove("listening"); inp.placeholder = "Quick add (Enter) or tell your assistant anything…"; rec = null; const t = heard.trim(); if (t) { inp.value = ""; askBrain(t); } };
-    rec.onerror = () => { btn.classList.remove("listening"); rec = null; };
-    rec.start();
-  });
+    if (!mic || mic.isListening() || !v) return;
+    e.stopImmediatePropagation(); inp.value = ""; askBrain(v);
+  }, true);
 }
 
 // ---------- full screen ----------
