@@ -617,7 +617,7 @@ function renderDay(body) {
 function renderRail() {
   const r = $("rail-body");
   r.innerHTML = "";
-  renderQuickLook(r);   // always first, always visible
+  if (!state.panel) renderQuickLook(r);   // first thing in the general view only
   if (state.panel === "day" && state.selected) return renderDayPanel(r);
   if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
   if (state.panel === "tomorrow") return renderTomorrowPanel(r);
@@ -1192,15 +1192,17 @@ const MIC_SVG = '<svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="c
 // Listening that gives him room to think: continuous mode, restarts itself when the
 // browser stops on a pause, and only finishes when he presses the button again or
 // goes quiet for SILENCE_MS after saying something. onInterim(text) keeps the box live.
-const SILENCE_MS = 12000;
+const SILENCE_MS = 10000;   // quiet this long after he said something → send
 function attachMic(btn, onFinal, onInterim, { seed = () => "" } = {}) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { btn.title = "Voice needs Chrome or Edge"; btn.disabled = true; return; }
   let rec = null, listening = false, finalText = "", interim = "", silence = null;
   const text = () => (finalText + " " + interim).replace(/\s+/g, " ").trim();
   const bump = () => { clearTimeout(silence); silence = setTimeout(() => { if (listening && finalText.trim()) stop(); }, SILENCE_MS); };
+  const label = btn.querySelector("span");
+  const idleLabel = label ? label.textContent : "";
   const finish = () => {
-    clearTimeout(silence); btn.classList.remove("listening"); rec = null;
+    clearTimeout(silence); btn.classList.remove("listening"); rec = null; if (label) label.textContent = idleLabel;
     const v = text(); finalText = ""; interim = "";
     if (v) onFinal(v);
   };
@@ -1222,8 +1224,8 @@ function attachMic(btn, onFinal, onInterim, { seed = () => "" } = {}) {
   btn.addEventListener("click", () => {
     if (listening) { stop(); return; }
     listening = true; finalText = (seed() || "").trim(); interim = "";
-    btn.classList.add("listening");
-    toast("Listening — talk, pause, think. Press the button again when you're done.");
+    btn.classList.add("listening"); if (label) label.textContent = "Listening… press to send";
+    toast("Listening. Talk at your pace — pauses are fine. Press again to send, or it sends itself after 10 s of quiet.");
     start(); bump();
   });
   return { stop, isListening: () => listening };
