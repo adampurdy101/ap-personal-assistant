@@ -58,7 +58,14 @@ const state = {
   showDone: false,
   addDraft: "",                                          // Add task panel text, kept across redraws
   addPick: null,                                         // Add task panel choices (day, priority, size, calendar)
+  tab: "week",                                           // phone: week · month · add · brain
+  pWeek: null,                                           // phone week screen: Sunday ISO of the week shown
+  pMonth: null,                                          // phone month screen: first-of-month ISO
 };
+// ---------- phone: one screen at a time, bottom tabs ----------
+const PHONE_MQ = window.matchMedia("(max-width: 740px), ((pointer: coarse) and (max-height: 520px))");
+const isPhone = () => PHONE_MQ.matches;
+PHONE_MQ.addEventListener("change", () => render({ now: true }));
 
 function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
@@ -304,6 +311,8 @@ function render(opts) {
   clearTimeout(M.pending); M.pending = null;
   renderTop();
   if (MINI_ONLY) { renderMini($("mini-root")); updateBadge(); return; }
+  document.body.classList.toggle("phone", isPhone());
+  if (isPhone()) { renderPhone(); updateBadge(); return; }
   renderCalendar();
   renderRail();
   $("layout").classList.toggle("wide", !!state.panel);
@@ -996,6 +1005,164 @@ function renderSkinny(r) {
 
 }
 
+// ---------- PHONE ----------
+// One screen at a time in the panel box; the month grid on the right is hidden. Big type,
+// nothing hover-only. Tabs: Week · Month · Add · Assistant. Day / Add / Assistant reuse the
+// desktop panels, so every button he knows is the same button.
+function renderPhone() {
+  document.querySelectorAll("#tabs button").forEach((b) => {
+    const t = b.dataset.tab;
+    const on = state.panel === "add" ? t === "add" : state.panel === "brain" ? t === "brain" : state.panel ? t === state.tab && t !== "add" && t !== "brain" : t === state.tab;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-current", on ? "page" : "false");
+  });
+  const r = $("rail-body");
+  r.innerHTML = "";
+  if (state.panel === "day" && state.selected) return renderDayPanel(r);
+  if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
+  if (state.panel === "add") return renderAddPanel(r);
+  if (state.panel === "brain") return renderBrainPanel(r);
+  if (state.tab === "month") return renderPhoneMonth(r);
+  renderPhoneWeek(r);
+}
+function phoneTab(tab) {
+  closeQuickFix();
+  state.openId = null; state.editId = null;
+  if (tab === "add") { state.tab = "add"; state.panel = "add"; }
+  else if (tab === "brain") { state.tab = "brain"; state.panel = "brain"; }
+  else { state.tab = tab; state.panel = null; if (tab === "week") state.pWeek = null; if (tab === "month") state.pMonth = null; }
+  render({ now: true });
+  const rail = $("rail"); if (rail) rail.scrollTop = 0;
+}
+// a task as one full-width line: mark · title · the one thing that matters (est. time / promise / drop-dead / status)
+function phoneChip(t) {
+  const c = el("div", `pchip p-${t.priority}` + (t.planned ? " planned" : "") + (t.status === "done" ? " is-done" : "") + (t.bucket === "home" ? " bucket-home" : ""));
+  c.append(el("span", "sym", PRI[t.priority].mark));
+  const body = el("div", "pt");
+  body.append(el("div", "ttl", t.title));
+  const bits = [];
+  if (t.dropdead_date) bits.push(t.dropdead_date === todayISO() ? "drop-dead today" : "drop-dead " + fmtShort(t.dropdead_date).replace(",", ""));
+  if (t.promised_to) bits.push("promised to " + t.promised_to);
+  if (t.status === "working") bits.push("working");
+  if (t.status === "waiting") bits.push("waiting on " + (t.waiting_on || "someone"));
+  if (t.status === "done") bits.push("done");
+  bits.push((SIZE[t.size] || "1 hr") + (t.confirmed ? "" : " ?"));
+  body.append(el("div", "bits", bits.join(" · ")));
+  c.append(body);
+  c.addEventListener("click", () => openDay(t.scheduled_date, t.id));
+  return c;
+}
+function phoneDayCard(dISO, { showEmpty = true } = {}) {
+  const d = fromISO(dISO), today = todayISO();
+  const offs = offOn(dISO), L = dayLoad(dISO), past = dISO < today;
+  const items = tasksOn(dISO);
+  const card = el("div", "pday" + (dISO === today ? " today" : "") + (offs.length ? " off" : "") + (isWeekend(dISO) ? " wk" : "") + (past ? " past" : "") + (offs.some(isHoliday) ? " holiday" : ""));
+  const head = el("div", "pd-head");
+  head.append(el("div", "pd-num", String(d.getDate())));
+  const dow = el("div", "pd-dow");
+  dow.append(el("b", "", d.toLocaleDateString("en-US", { weekday: "long" })), el("span", "", d.toLocaleDateString("en-US", { month: "short" }) + (dISO === today ? " · TODAY" : "")));
+  head.append(dow);
+  let load = "";
+  if (offs.length && !isWeekend(dISO)) load = "OFF";
+  else if (!isWeekend(dISO) && showMeetings() && !past) load = L.over ? `!! ${fmtHrs(L.total)} / 8` : L.total ? `${fmtHrs(L.total)} / 8` : "open";
+  if (load) head.append(el("div", "pd-load" + (L.over ? " over" : ""), load));
+  head.addEventListener("click", () => openDay(dISO));
+  card.append(head);
+  const body = el("div", "pd-body");
+  offs.forEach((m) => body.append(meetingLine(m)));
+  if (showMeetings()) {
+    const ms = timedOn(dISO).sort((a, b) => a.start_at.localeCompare(b.start_at));
+    ms.filter((m) => m.attending).forEach((m) => body.append(meetingLine(m)));
+    const inv = ms.filter((m) => !m.attending).length;
+    if (inv) { const i = el("div", "pd-inv", `◌ ${inv} invited`); i.addEventListener("click", () => openDay(dISO)); body.append(i); }
+  }
+  items.forEach((t) => body.append(phoneChip(t)));
+  if (!items.length && !offs.length && showEmpty) body.append(el("div", "pd-empty", past ? "" : "nothing booked"));
+  card.append(body);
+  return card;
+}
+function renderPhoneWeek(r) {
+  const today = todayISO();
+  const sun = state.pWeek ? fromISO(state.pWeek) : weekStart(new Date());
+  const sunISO = iso(sun), satISO = iso(addDays(sun, 6));
+  const hasToday = today >= sunISO && today <= satISO;
+  // header: ‹ Week 46 · Nov 8–14 ›  Today
+  const h = el("div", "sec head pnav");
+  const lab = el("div", "lab");
+  const prev = el("button", "btn", "‹"); prev.setAttribute("aria-label", "Previous week"); prev.addEventListener("click", () => { state.pWeek = iso(addDays(sun, -7)); render({ now: true }); });
+  const next = el("button", "btn", "›"); next.setAttribute("aria-label", "Next week"); next.addEventListener("click", () => { state.pWeek = iso(addDays(sun, 7)); render({ now: true }); });
+  const ttl = el("div", "pttl");
+  ttl.append(el("b", "", `Week ${isoWeek(addDays(sun, 1))}`), el("span", "", `${sun.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${addDays(sun, 6).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`));
+  lab.append(prev, ttl, next);
+  if (!hasToday) { const t = el("button", "btn sm", "Today"); t.addEventListener("click", () => { state.pWeek = null; render({ now: true }); }); lab.append(t); }
+  h.append(lab); r.append(h);
+  // NOW strip — only on the current week
+  if (hasToday) {
+    const nx = nextUp(), L = dayLoad(today);
+    const now = el("div", "sec focus pnow");
+    const l2 = el("div", "lab"); l2.append("Now", el("small", "", showMeetings() ? workLeftText() : "")); now.append(l2);
+    if (offOn(today).length) now.append(el("div", "pnx", "Day off — " + offOn(today).map((m) => m.title).join(", ")));
+    else if (nx) {
+      const row = el("div", "pnx");
+      row.append(el("span", "nxsym" + (nx.priority === "urgent" ? "" : " calm"), PRI[nx.priority].mark), el("b", "", nx.title));
+      row.addEventListener("click", () => openDay(today, nx.id));
+      now.append(row);
+      const bt = el("div", "nxbtn");
+      const ok = el("button", "btn ok", "✓ Done"); ok.addEventListener("click", () => saveTask(nx.id, { status: "done", done_at: new Date().toISOString() }));
+      const push = el("button", "btn push", "Push →"); push.addEventListener("click", async () => { const to = nextDay(today, 1, nx.bucket); if (await moveTask(nx, to, "Pushed from Next up")) toast(`Pushed to ${fmtShort(to)}`); });
+      bt.append(ok, push); now.append(bt);
+    } else now.append(el("div", "pnx", tasksOn(today).length ? "Everything on today is done." : "Nothing on today."));
+    if (showMeetings() && !offOn(today).length) now.append(el("div", "hint", L.over ? `!! ${fmtHrs(L.total)} on an 8 h day` : `${fmtHrs(L.total)} of 8 h booked`));
+    r.append(now);
+  }
+  const list = el("div", "pweek");
+  for (let i = 0; i < 7; i++) list.append(phoneDayCard(iso(addDays(sun, i))));
+  r.append(list);
+  // promises you owe this week + inbox count, short
+  const un = unscheduled();
+  const foot = el("div", "sec pfoot");
+  const inbox = el("div", "row link"); inbox.append(el("b", "", `Inbox: ${un.length} unscheduled`), el("i", "", un.length ? "give each a day →" : "")); inbox.addEventListener("click", () => openUnscheduled()); foot.append(inbox);
+  const out = el("div", "row"); const lo = el("button", "btn ghost sm", "Sign out"); lo.addEventListener("click", () => $("logout-btn").click()); out.append(lo, el("i", "", document.querySelector(".ver")?.textContent || "")); foot.append(out);
+  r.append(foot);
+  if (hasToday && !state.pWeek) requestAnimationFrame(() => { const t = r.querySelector(".pday.today"); if (t && t.getBoundingClientRect().top > window.innerHeight * 0.7) t.scrollIntoView({ block: "start" }); });
+}
+function renderPhoneMonth(r) {
+  const today = todayISO();
+  const first = state.pMonth ? fromISO(state.pMonth) : firstOfMonth(new Date());
+  const h = el("div", "sec head pnav");
+  const lab = el("div", "lab");
+  const prev = el("button", "btn", "‹"); prev.setAttribute("aria-label", "Previous month"); prev.addEventListener("click", () => { state.pMonth = iso(new Date(first.getFullYear(), first.getMonth() - 1, 1)); render({ now: true }); });
+  const next = el("button", "btn", "›"); next.setAttribute("aria-label", "Next month"); next.addEventListener("click", () => { state.pMonth = iso(new Date(first.getFullYear(), first.getMonth() + 1, 1)); render({ now: true }); });
+  const ttl = el("div", "pttl"); ttl.append(el("b", "", first.toLocaleDateString("en-US", { month: "long", year: "numeric" })));
+  lab.append(prev, ttl, next);
+  if (state.pMonth) { const t = el("button", "btn sm", "Today"); t.addEventListener("click", () => { state.pMonth = null; render({ now: true }); }); lab.append(t); }
+  h.append(lab); r.append(h);
+  const grid = el("div", "pm");
+  ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].forEach((d) => grid.append(el("div", "pm-dow", d)));
+  for (let i = 0; i < first.getDay(); i++) grid.append(el("div", "pm-cell blank", ""));
+  const n = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  for (let d = 1; d <= n; d++) {
+    const dISO = iso(new Date(first.getFullYear(), first.getMonth(), d));
+    const offs = offOn(dISO), L = dayLoad(dISO), items = tasksOn(dISO).filter((t) => t.status !== "done");
+    const c = el("div", "pm-cell" + (dISO === today ? " today" : "") + (isWeekend(dISO) ? " wk" : "") + (offs.length ? " off" : "") + (offs.some(isHoliday) ? " holiday" : "") + (dISO < today ? " past" : ""));
+    c.append(el("div", "n", String(d)));
+    if (offs.length && !isWeekend(dISO)) c.append(el("div", "tag", offs.some(isHoliday) ? "HOL" : "OFF"));
+    else if (items.length) {
+      const marks = el("div", "marks");
+      items.slice(0, 3).forEach((t) => marks.append(el("span", `mk p-${t.priority}`, PRI[t.priority].mark)));
+      if (items.length > 3) marks.append(el("span", "more", `+${items.length - 3}`));
+      c.append(marks);
+      if (!isWeekend(dISO) && showMeetings()) c.append(el("div", "hrs" + (L.over ? " over" : ""), (L.over ? "!! " : "") + fmtHrs(L.total)));
+    } else if (!isWeekend(dISO) && showMeetings() && L.mtg) c.append(el("div", "hrs", fmtHrs(L.mtg)));
+    c.addEventListener("click", () => openDay(dISO));
+    grid.append(c);
+  }
+  r.append(grid);
+  const leg = el("div", "sec pleg");
+  leg.append(el("div", "row wrap", "!! Urgent · ▲ High · ● Normal · – Low · hours = booked of 8 · HOL = holiday · OFF = PTO · tap a day to open it"));
+  r.append(leg);
+}
+
 // QUICK LOOK — the date, the week, the countdown. Pinned at the top of the panel.
 function renderQuickLook(r) {
   const sQ = card(r, "Quick look", { cls: "ql-card" });
@@ -1031,7 +1198,7 @@ function nextOff() {
 
 function panelHeader(r, title, sub) {
   const s = card(r, title, { sub });
-  const x = el("button", "btn ghost sm close", "✕ Close"); x.title = "Close (Esc)";
+  const x = el("button", "btn ghost sm close", isPhone() ? "‹ Back" : "✕ Close"); x.title = "Close (Esc)";
   x.addEventListener("click", closePanel);
   s.querySelector(".lab").append(x);
   s.classList.add("head");
@@ -1306,7 +1473,7 @@ function openDay(dateISO, taskId = null) {
 }
 function openUnscheduled(taskId = null) { state.panel = "unscheduled"; state.openId = taskId; state.editId = null; render(); }
 function openAdd() { state.panel = "add"; state.openId = null; state.editId = null; render({ now: true }); }
-function closePanel() { state.panel = null; state.openId = null; state.editId = null; render({ now: true }); }
+function closePanel() { state.panel = null; state.openId = null; state.editId = null; if (state.tab === "add" || state.tab === "brain") state.tab = "week"; render({ now: true }); }
 
 // ---------- quick add parsing ----------
 // "Send James layout fri !!"  → title, priority urgent, date next Friday
@@ -1380,7 +1547,7 @@ const VOICE_TARGETS = {
 };
 function liveBubble(v) { const b = document.querySelector("#live-bubble .txt"); if (b) b.textContent = v || "…"; }
 function voiceStart(key) {
-  if (!SR) { toast("Voice needs Chrome or Edge — type it instead"); return false; }
+  if (!SR) { toast(isPhone() ? "No mic here — use the keyboard's mic in the box, then send" : "Voice needs Chrome or Edge — type it instead"); return false; }
   if (voice.on) return false;
   const t = VOICE_TARGETS[key]; if (!t) return false;
   voice.on = true; voice.key = key; voice.finalText = (t.seed() || "").trim(); voice.interim = ""; voice.restarts = 0;
@@ -1631,6 +1798,7 @@ function wire() {
   $("next-btn").addEventListener("click", () => shift(1));
   $("today-btn").addEventListener("click", () => { state.cursor = new Date(); state.mJump = iso(firstOfMonth(state.cursor)); render(); });
   $("add-btn").addEventListener("click", openAdd);
+  document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", () => phoneTab(b.dataset.tab)));
   $("balance-btn").addEventListener("click", () => {
     const s = weekStart(new Date()), mon = iso(addDays(s, 1)), fri = iso(addDays(s, 5));
     askBrain(`Balance this week (${mon} to ${fri}): apply the scheduling rules to Mon–Fri. Keep every day inside 8 hours counting meetings I attend and days off. Move overflow forward — low first, then normal, toward their targets, never past a drop-dead, never anything promised to someone. Urgent stays put. One-line reason on every move, and tell me what moved.`);
