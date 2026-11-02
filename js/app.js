@@ -56,6 +56,7 @@ const state = {
   meetings: [],                                          // PCI Outlook meetings (titles + times only)
   meetingsSync: null,
   showDone: false,
+  tomorrowDraft: "",                                     // Tomorrow panel text, kept across redraws
 };
 
 function toast(msg) {
@@ -114,6 +115,7 @@ let lastRefresh = 0;
 // don't redraw under Adam's fingers: skip while he is editing or typing
 function userIsTyping() {
   if (state.editId != null) return true;
+  if (voice.on) return true;
   const a = document.activeElement;
   return !!a && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && a.type !== "checkbox" && a.value));
 }
@@ -289,9 +291,10 @@ function tooltip(t) {
 }
 
 // ---------- render ----------
-function render() {
+function render(opts) {
   // Mid-scroll in month view? A rebuild would snap the scrollbar back — wait for it to settle.
-  if (state.view === "month" && !state.mJump && Date.now() - M.lastScroll < 400 && M.scroller && M.scroller.isConnected) {
+  // (opts.now skips that wait: the Assistant panel must open the instant he presses the button.)
+  if (!opts?.now && state.view === "month" && !state.mJump && Date.now() - M.lastScroll < 400 && M.scroller && M.scroller.isConnected) {
     clearTimeout(M.pending); M.pending = setTimeout(render, 450); return;
   }
   clearTimeout(M.pending); M.pending = null;
@@ -307,6 +310,9 @@ function render() {
 function renderTop() {
   document.querySelectorAll("#bucket-seg button").forEach((b) => b.classList.toggle("on", b.dataset.bucket === state.bucket));
   document.querySelectorAll("#view-seg button").forEach((b) => b.classList.toggle("on", b.dataset.view === state.view));
+  const btn = $("tell-btn"), inp = $("quick-input");
+  if (btn) { btn.classList.toggle("listening", voice.on); const l = btn.querySelector("span"); if (l) l.textContent = voice.on ? "Listening… press to send" : "Tell Assistant"; }
+  if (inp) inp.placeholder = voice.on ? "Listening… say it at your pace" : "Quick add (Enter) or tell your assistant anything…";
 }
 
 function renderCalendar() {
@@ -626,33 +632,47 @@ function renderRail() {
 }
 
 // ---------- AP brain (Supabase edge function ap-brain) ----------
-const brain = { busy: false, log: [], history: [], batch: null, questions: null, lastBatch: null };
+const brain = { busy: false, log: [], history: [], batch: null, questions: null, lastBatch: null, queue: [] };
+const BRAIN_TIMEOUT_MS = 90000;
 
+// Everything he says goes through here. Never dropped: if AP is still thinking, the
+// next thing waits its turn and goes out as the next message.
 async function askBrain(text) {
-  if (!text || brain.busy) return;
+  text = String(text || "").trim();
+  if (!text) return;
+  if (brain.busy) { brain.queue.push(text); brain.log.push({ who: "you", text, queued: true }); render({ now: true }); return; }
   brain.busy = true; brain.questions = null;
+  const qi = brain.log.findIndex((m) => m.queued && m.text === text);
+  if (qi >= 0) brain.log.splice(qi, 1);
   brain.log.push({ who: "you", text });
-  state.panel = "brain"; state.openId = null; state.editId = null; render();
-  const { data: s } = await db.auth.getSession();
-  const now = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  state.panel = "brain"; state.openId = null; state.editId = null; render({ now: true });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), BRAIN_TIMEOUT_MS);
   try {
+    const { data: s } = await db.auth.getSession();
+    if (!s?.session?.access_token) throw new Error("not signed in");
+    const now = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
     const res = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/ap-brain`, {
-      method: "POST",
+      method: "POST", signal: ctrl.signal,
       headers: { "Content-Type": "application/json", apikey: CONFIG.SUPABASE_KEY, Authorization: `Bearer ${s.session.access_token}` },
       body: JSON.stringify({ text, today: todayISO(), now, history: brain.history, batch_id: brain.batch }),
     });
+    if (!res.ok) throw new Error("server said " + res.status);
     const out = await res.json();
     brain.history.push({ role: "user", content: text });
     if (out.reply) brain.history.push({ role: "assistant", content: out.reply });
     brain.history = brain.history.slice(-10);
-    brain.log.push({ who: "ap", text: out.reply || "(no reply)", actions: out.actions || [], questions: out.questions || null });
+    brain.log.push({ who: "ap", text: out.reply || "(no reply)", actions: out.actions || [], questions: out.questions || null, error: !!out.error });
     if (out.pending) { brain.batch = out.batch_id; brain.questions = out.questions; }
     else { brain.batch = null; if ((out.actions || []).length) brain.lastBatch = out.batch_id; }
   } catch (e) {
-    brain.log.push({ who: "ap", text: "Couldn't reach the brain: " + (e.message || e) });
+    const why = e.name === "AbortError" ? "it took too long" : (e.message || String(e));
+    brain.log.push({ who: "ap", text: `Didn't get through (${why}). Say it again or press Retry.`, error: true, retry: text });
   }
+  clearTimeout(timer);
   brain.busy = false;
   await loadAll();
+  if (brain.queue.length) askBrain(brain.queue.shift());
 }
 
 function answerQuestions(answers) {
@@ -680,12 +700,13 @@ async function undoLastBatch() {
 }
 
 function renderBrainPanel(r) {
-  panelHeader(r, "Assistant", brain.busy ? "thinking…" : "");
+  panelHeader(r, "Assistant", brain.busy ? "thinking…" : voice.on ? "listening" : "");
   const box = el("div", "brain");
-  brain.log.slice(-8).forEach((m) => {
-    const b = el("div", "bubble " + (m.who === "you" ? "you" : "fm"));
-    b.append(el("div", "who", m.who === "you" ? "You" : "Assistant"));
+  brain.log.slice(-10).forEach((m) => {
+    const b = el("div", "bubble " + (m.who === "you" ? "you" : "fm") + (m.queued ? " queued" : "") + (m.error ? " err" : ""));
+    b.append(el("div", "who", m.who === "you" ? (m.queued ? "You · waiting for the last reply" : "You") : "Assistant"));
     b.append(el("div", "txt", m.text));
+    if (m.retry && !brain.busy) { const rb = el("button", "btn sm", "Retry"); rb.addEventListener("click", () => { const t = m.retry; delete m.retry; askBrain(t); }); b.append(rb); }
     if (m.actions && m.actions.length) {
       const ul = el("ul", "acts");
       m.actions.forEach((a) => {
@@ -702,6 +723,11 @@ function renderBrainPanel(r) {
     box.append(b);
   });
   if (brain.busy) box.append(el("div", "hint", "Working on it…"));
+  if (voice.on && (voice.key === "brain" || voice.key === "quick")) {
+    const live = el("div", "bubble you live"); live.id = "live-bubble";
+    live.append(el("div", "who", "You · listening — pause 10 s or press to send"), el("div", "txt", voiceText() || "…"));
+    box.append(live);
+  }
   r.append(box);
 
   if (brain.questions && !brain.busy) {
@@ -725,13 +751,17 @@ function renderBrainPanel(r) {
   }
 
   const foot = el("div", "brain-foot");
-  const inp = el("input"); inp.type = "text"; inp.placeholder = "Say more…"; inp.className = "brain-input";
+  const inp = el("input"); inp.type = "text"; inp.placeholder = voice.on ? "Listening…" : "Say more…"; inp.className = "brain-input";
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter" && inp.value.trim()) { const v = inp.value.trim(); inp.value = ""; askBrain(v); } });
-  const mic = el("button", "mic"); mic.type = "button"; mic.innerHTML = MIC_SVG; mic.title = "Speak";
-  attachMic(mic, (v) => askBrain(v), (v) => { inp.value = v; });
+  const mic = el("button", "mic" + (voice.on ? " listening" : "")); mic.type = "button"; mic.innerHTML = MIC_SVG;
+  mic.title = voice.on ? "Press to send" : "Press and talk";
+  mic.addEventListener("click", () => { if (voice.on) voiceStop(); else { const v = inp.value.trim(); if (v) { inp.value = ""; askBrain(v); } else voiceStart("brain"); } });
+  if (voice.on) inp.disabled = true;
   foot.append(inp, mic);
   if (brain.lastBatch && !brain.busy) { const u = el("button", "btn sm", "Undo last"); u.addEventListener("click", undoLastBatch); foot.append(u); }
   r.append(foot);
+  // keep the newest bubble in view
+  requestAnimationFrame(() => { const p = $("rail"); if (p) p.scrollTop = p.scrollHeight; });
 }
 
 
@@ -998,18 +1028,20 @@ function renderTomorrowPanel(r) {
   const sW = card(r, "What do you want to work on?", { sub: "one per line" });
   const wrap = el("div", "tomorrow");
   wrap.append(el("div", "hint", "They land as Planned (dashed) on tomorrow; the 5:30 a.m. plan builds the day around them."));
-  const ta = el("textarea"); ta.placeholder = "Miner L2 leave-outs\nC1 DWG export\n…";
+  const ta = el("textarea"); ta.placeholder = voice.on && voice.key === "tomorrow" ? "Listening…" : "Miner L2 leave-outs\nC1 DWG export\n…";
+  ta.value = state.tomorrowDraft || "";
+  ta.addEventListener("input", () => { state.tomorrowDraft = ta.value; });
   const taWrap = el("div", "ta-wrap"); taWrap.append(ta);
-  const mic = el("button", "mic"); mic.type = "button"; mic.title = "Speak it"; mic.setAttribute("aria-label", "Speak tomorrow's list");
+  const mic = el("button", "mic" + (voice.on && voice.key === "tomorrow" ? " listening" : "")); mic.type = "button"; mic.title = voice.on ? "Press to stop" : "Speak it"; mic.setAttribute("aria-label", "Speak tomorrow's list");
   mic.innerHTML = MIC_SVG;
-  attachMic(mic, (text) => { ta.value = (ta.value ? ta.value.replace(/\s*$/, "\n") : "") + text; });
+  mic.addEventListener("click", () => voiceToggle("tomorrow"));
   taWrap.append(mic);
   wrap.append(taWrap);
   const act = el("div", "actions");
   const plan = el("button", "btn primary", "Plan it with Assistant");
   plan.addEventListener("click", () => {
     const v = ta.value.trim(); if (!v) return;
-    ta.value = "";
+    ta.value = ""; state.tomorrowDraft = "";
     askBrain(`Tomorrow (${tmr}) I want to work on: ${v}. Pencil these in on tomorrow as planned, and reshuffle anything else on tomorrow that no longer fits.`);
   });
   const save = el("button", "btn", "Just pencil in (no reshuffle)");
@@ -1020,7 +1052,7 @@ function renderTomorrowPanel(r) {
       const p = parseQuick(line);
       await insertTask({ title: p.title, priority: p.priority, bucket: p.bucket || (state.bucket === "both" ? "work" : state.bucket), scheduled_date: tmr, planned: true, job: p.job, source: "tomorrow" });
     }
-    ta.value = "";
+    ta.value = ""; state.tomorrowDraft = "";
     toast(`${lines.length} penciled in for tomorrow`);
   });
   act.append(plan, save);
@@ -1142,8 +1174,8 @@ function openDay(dateISO, taskId = null) {
   render();
 }
 function openUnscheduled(taskId = null) { state.panel = "unscheduled"; state.openId = taskId; state.editId = null; render(); }
-function openTomorrow() { state.panel = "tomorrow"; state.openId = null; state.editId = null; render(); }
-function closePanel() { state.panel = null; state.openId = null; state.editId = null; render(); }
+function openTomorrow() { state.panel = "tomorrow"; state.openId = null; state.editId = null; render({ now: true }); }
+function closePanel() { state.panel = null; state.openId = null; state.editId = null; render({ now: true }); }
 
 // ---------- quick add parsing ----------
 // "Send James layout fri !!"  → title, priority urgent, date next Friday
@@ -1189,59 +1221,116 @@ async function quickAdd(text) {
 // ---------- voice (Web Speech API) ----------
 const MIC_SVG = '<svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>';
 
-// Listening that gives him room to think: continuous mode, restarts itself when the
-// browser stops on a pause, and only finishes when he presses the button again or
-// goes quiet for SILENCE_MS after saying something. onInterim(text) keeps the box live.
-const SILENCE_MS = 10000;   // quiet this long after he said something → send
-function attachMic(btn, onFinal, onInterim, { seed = () => "" } = {}) {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { btn.title = "Voice needs Chrome or Edge"; btn.disabled = true; return; }
-  let rec = null, listening = false, finalText = "", interim = "", silence = null;
-  const text = () => (finalText + " " + interim).replace(/\s+/g, " ").trim();
-  const bump = () => { clearTimeout(silence); silence = setTimeout(() => { if (listening && finalText.trim()) stop(); }, SILENCE_MS); };
-  const label = btn.querySelector("span");
-  const idleLabel = label ? label.textContent : "";
-  const finish = () => {
-    clearTimeout(silence); btn.classList.remove("listening"); rec = null; if (label) label.textContent = idleLabel;
-    const v = text(); finalText = ""; interim = "";
-    if (v) onFinal(v);
-  };
-  const stop = () => { listening = false; if (rec) { try { rec.stop(); } catch { finish(); } } else finish(); };
-  const start = () => {
-    rec = new SR(); rec.lang = "en-US"; rec.continuous = true; rec.interimResults = true;
-    rec.onresult = (e) => {
-      let fin = "", int = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) { const r = e.results[i]; if (r.isFinal) fin += r[0].transcript + " "; else int += r[0].transcript; }
-      if (fin) finalText = (finalText + " " + fin).replace(/\s+/g, " ");
-      interim = int;
-      if (onInterim) onInterim(text());
-      bump();
-    };
-    rec.onend = () => { if (listening) { try { start(); } catch { finish(); } } else finish(); };
-    rec.onerror = (e) => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { listening = false; toast("Mic blocked — click the lock icon by the address bar → Microphone → Allow"); finish(); } };
-    rec.start();
-  };
-  btn.addEventListener("click", () => {
-    if (listening) { stop(); return; }
-    listening = true; finalText = (seed() || "").trim(); interim = "";
-    btn.classList.add("listening"); if (label) label.textContent = "Listening… press to send";
-    toast("Listening. Talk at your pace — pauses are fine. Press again to send, or it sends itself after 10 s of quiet.");
-    start(); bump();
-  });
-  return { stop, isListening: () => listening };
+// ---------- voice: ONE listener for the whole app ----------
+// Press to start. Talk at your pace; pauses are fine — the browser's recognizer is
+// restarted under the hood whenever it gives up. It sends by itself after SILENCE_MS
+// of quiet once you've said something, or when you press again. Buttons only reflect
+// the state; the state lives here, so a panel redraw never loses a session.
+const SILENCE_MS = 10000;
+const IDLE_MS = 30000;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const voice = { rec: null, on: false, key: null, finalText: "", interim: "", silence: null, stopTimer: null, restarts: 0 };
+const voiceText = () => (voice.finalText + " " + voice.interim).replace(/\s+/g, " ").trim();
+// Where the words go when he's done. quick (top bar) and brain (panel mic) are the
+// same conversation; tomorrow lands in that panel's list.
+const toAssistant = {
+  seed: () => ($("quick-input")?.value || document.querySelector(".brain-input")?.value || "").trim(),
+  live: (v) => { const i = $("quick-input"); if (i) i.value = v; liveBubble(v); },
+  done: (v) => { const i = $("quick-input"); if (i) i.value = ""; const j = document.querySelector(".brain-input"); if (j) j.value = ""; askBrain(v); },
+};
+const VOICE_TARGETS = {
+  quick: toAssistant,
+  brain: toAssistant,
+  tomorrow: {
+    seed: () => "",
+    live: (v) => { const t = document.querySelector(".tomorrow textarea"); if (t) t.placeholder = v || "Listening…"; },
+    done: (v) => { const d = (state.tomorrowDraft || "").replace(/\s*$/, ""); state.tomorrowDraft = (d ? d + "\n" : "") + v; },
+  },
+};
+function liveBubble(v) { const b = document.querySelector("#live-bubble .txt"); if (b) b.textContent = v || "…"; }
+function voiceStart(key) {
+  if (!SR) { toast("Voice needs Chrome or Edge — type it instead"); return false; }
+  if (voice.on) return false;
+  const t = VOICE_TARGETS[key]; if (!t) return false;
+  voice.on = true; voice.key = key; voice.finalText = (t.seed() || "").trim(); voice.interim = ""; voice.restarts = 0;
+  if (key === "quick" || key === "brain") { state.panel = "brain"; state.openId = null; state.editId = null; }
+  render({ now: true });
+  voiceSession();
+  voiceBump();
+  return true;
 }
+function voiceSession() {
+  let rec;
+  try { rec = new SR(); } catch { voiceFinish(); return; }
+  voice.rec = rec;
+  rec.lang = "en-US"; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
+  rec.onresult = (e) => {
+    if (voice.rec !== rec) return;
+    let fin = "", int = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) { const r = e.results[i]; if (r.isFinal) fin += r[0].transcript + " "; else int += r[0].transcript; }
+    if (fin) voice.finalText = (voice.finalText + " " + fin).replace(/\s+/g, " ");
+    voice.interim = int; voice.restarts = 0;
+    VOICE_TARGETS[voice.key].live(voiceText());
+    voiceBump();
+  };
+  rec.onerror = (e) => {
+    if (voice.rec !== rec) return;
+    const code = e && e.error;
+    if (code === "not-allowed" || code === "service-not-allowed") { voice.on = false; toast("Mic blocked — click the lock icon by the address bar → Microphone → Allow"); }
+    else if (code === "audio-capture") { voice.on = false; toast("No microphone found"); }
+    else if (code === "network") { voice.on = false; toast("Speech service hiccup — press and try again"); }
+    // no-speech / aborted: the restart in onend handles it
+  };
+  rec.onend = () => {
+    if (voice.rec !== rec) return;
+    voice.rec = null; clearTimeout(voice.stopTimer);
+    if (!voice.on) { voiceFinish(); return; }
+    if (++voice.restarts > 20) { voiceFinish(); return; }   // something is wrong; send what we have
+    try { voiceSession(); } catch { voiceFinish(); }
+  };
+  try { rec.start(); } catch { voice.rec = null; voiceFinish(); }
+}
+// quiet for SILENCE_MS after he's said something → send; nothing heard at all for IDLE_MS → give up
+function voiceBump() {
+  clearTimeout(voice.silence);
+  const heard = !!voice.finalText.trim();
+  voice.silence = setTimeout(() => {
+    if (!voice.on) return;
+    if (!heard && !voice.finalText.trim()) toast("Didn't hear anything — press and try again");
+    voiceStop();
+  }, heard ? SILENCE_MS : IDLE_MS);
+}
+function voiceStop() {
+  if (!voice.on) return;
+  voice.on = false; clearTimeout(voice.silence);
+  const r = voice.rec;
+  if (!r) { voiceFinish(); return; }
+  try { r.stop(); } catch { voiceFinish(); return; }
+  // the browser normally answers stop() with onend; if it doesn't, send what we have anyway
+  clearTimeout(voice.stopTimer);
+  voice.stopTimer = setTimeout(() => { if (voice.rec === r) voiceFinish(); }, 1500);
+}
+function voiceFinish() {
+  clearTimeout(voice.silence); clearTimeout(voice.stopTimer);
+  voice.on = false; voice.rec = null;
+  const v = voiceText(), key = voice.key;
+  voice.finalText = ""; voice.interim = ""; voice.key = null;
+  if (v && key && VOICE_TARGETS[key]) VOICE_TARGETS[key].done(v);
+  render({ now: true });
+}
+function voiceToggle(key) { if (voice.on) voiceStop(); else voiceStart(key); }
+// tiny handle for checking the voice state from the console / tests
+window.AP = { get voice() { return { on: voice.on, key: voice.key, text: voiceText(), restarts: voice.restarts }; }, get brain() { return { busy: brain.busy, queued: brain.queue.length, log: brain.log.length }; }, get panel() { return state.panel; } };
 
 function initMic() {
-  // one button: typed text in the box → send it to AP; empty box → press and talk, press again to send
+  // one button: press → listen; press again → send; typed text in the box → send
   const btn = $("tell-btn"), inp = $("quick-input");
-  const PH = inp.placeholder;
-  const mic = attachMic(btn, (v) => { inp.value = ""; inp.placeholder = PH; askBrain(v); }, (v) => { inp.value = v; inp.placeholder = "Listening… press Tell Assistant again to send"; }, { seed: () => inp.value });
-  // typed text goes straight out (capture phase runs before attachMic's handler, which would otherwise start the mic)
-  btn.addEventListener("click", (e) => {
+  btn.addEventListener("click", () => {
+    if (voice.on) { voiceStop(); return; }
     const v = inp.value.trim();
-    if (!mic || mic.isListening() || !v) return;
-    e.stopImmediatePropagation(); inp.value = ""; askBrain(v);
-  }, true);
+    if (v) { inp.value = ""; askBrain(v); return; }
+    voiceStart("quick");
+  });
 }
 
 // ---------- full screen ----------

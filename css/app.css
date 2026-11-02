@@ -319,6 +319,12 @@ b, strong { font-weight: 700; }
 .bubble.fm { background: #fff; margin-right: 24px; }
 .bubble .who { font-size: 10px; color: var(--ink-3); margin-bottom: 2px; text-transform: uppercase; letter-spacing: 1px; font-family: var(--cond); }
 .bubble .txt { white-space: pre-wrap; }
+.bubble.queued { border-style: dashed; opacity: .85; }
+.bubble.live { border-style: dashed; background: #fff8ec; }
+.bubble.live .txt { font-style: italic; }
+.bubble.err { border-color: var(--red); }
+.bubble .btn { margin-top: 6px; }
+.brain-input:disabled { background: #f6f1e6; color: var(--ink-3); }
 .bubble .acts { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); }
 .questions { border: 1.5px solid var(--rule); background: var(--tan); border-radius: 6px; padding: 10px; margin: 0 12px 10px; }
 .questions .q { margin-bottom: 8px; }
