@@ -85,6 +85,8 @@ b, strong { font-weight: 700; }
 .cal-head h2 { font-size: 26px; font-weight: 900; letter-spacing: -.5px; color: var(--ink); border: 1.5px solid var(--rule); border-radius: var(--radius); background: #fff; padding: 1px 14px; box-shadow: var(--shadow); min-width: 220px; text-align: center; }
 #today-btn { background: #fff; color: var(--ink); border: 2px solid var(--red); font-weight: 800; padding: 6px 16px; border-radius: var(--radius); letter-spacing: .02em; box-shadow: var(--shadow); }
 #today-btn:hover { background: #fde3e3; }
+/* "viewing October" — shows while the month grid is scrolled away from the month in focus */
+.peek { font-size: 12px; font-weight: 600; color: var(--maroon); border: 1px dashed var(--maroon); border-radius: 4px; padding: 3px 8px; background: #fff; white-space: nowrap; }
 #balance-btn { background: var(--olive); font-weight: 700; }
 .legend { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .hl { font-size: 11px; font-weight: 600; border: 1px solid var(--rule); border-radius: 4px; padding: 3px 8px; background: #fff; box-shadow: var(--shadow); white-space: nowrap; color: var(--ink); }
@@ -103,7 +105,12 @@ b, strong { font-weight: 700; }
 .chip.p-low    { border-style: dashed; border-color: #777; color: #555; box-shadow: none; }
 .chip.planned  { background: transparent; border-style: dashed; border-color: #777; color: #333; box-shadow: none; }
 .chip.bucket-home { box-shadow: inset 3px 0 0 var(--home-line), var(--chip-shadow); padding-left: 9px; }
-.chip.is-done { text-decoration: line-through; opacity: .55; }
+/* done: stays on its day, faded, ✓ in front, struck through — a second click on × clears it to the Trash */
+.chip.is-done { text-decoration: line-through; opacity: .55; cursor: pointer; }
+.chip.is-done .sym { text-decoration: none; }
+.chip.is-done:hover { opacity: .85; }
+.chip .mv.x { right: 2px; font-size: 14px; line-height: 14px; }
+.chip.is-done:hover .mv.x { display: block; }
 /* "?" = size or priority were guessed; click it to set them */
 .chip .q { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 1.5px solid var(--maroon); color: var(--maroon); font-size: 10px; font-weight: 900; line-height: 11px; text-align: center; margin-right: 4px; vertical-align: -2px; cursor: pointer; }
 .chip.p-urgent .q { border-color: #fff; }
@@ -169,7 +176,10 @@ b, strong { font-weight: 700; }
 .day.past .num { color: #444; }
 .day.past .chip, .day.past .mtg { opacity: .7; }
 .day.past:hover .chip, .day.past:hover .mtg { opacity: 1; }
-.day.past .stamp { position: absolute; right: 6px; bottom: 5px; font-size: 9px; letter-spacing: 1.5px; color: var(--red); font-weight: 800; border: 1px solid var(--red); border-radius: 2px; padding: 1px 5px; transform: rotate(-6deg); z-index: 2; pointer-events: none; background: rgba(255,255,255,.55); }
+.day.past .stamp { position: absolute; right: 6px; bottom: 5px; font-size: 9px; letter-spacing: 1.5px; color: var(--red); font-weight: 800; border: 1px solid var(--red); border-radius: 2px; padding: 1px 5px; transform: rotate(-6deg); z-index: 2; pointer-events: auto; background: rgba(255,255,255,.55); }
+/* a past day with something still open: solid stamp, says how many — not just a different color */
+.day.past .stamp.open { background: var(--red); color: #fff; border-color: var(--rule); transform: none; letter-spacing: 1px; }
+.day.past .chip.is-done { opacity: .5; }
 .day.today { background: #fff; background-image: none; border: 3px dashed var(--red); padding: 2px 4px 13px; }
 .day.today .num { color: var(--ink); }
 .today-tag { font-size: 9px; letter-spacing: 1.5px; margin-left: 6px; font-weight: 800; color: var(--red); }
@@ -214,6 +224,11 @@ b, strong { font-weight: 700; }
 .sec .row .sym { display: inline-block; width: 18px; font-weight: 800; }
 .sec .row .sym.u { color: var(--red); }
 .sec .row .sym.q { color: var(--maroon); }
+.sec .row .sym.ok { color: #3c5a1e; }
+.sec .row.done { color: var(--ink-3); }
+.sec .row.done .tt { text-decoration: line-through; }
+.sec .row.undo { display: flex; align-items: center; gap: 8px; white-space: normal; }
+.sec .row.undo .ulab { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sec .row.pr { display: flex; align-items: center; gap: 6px; }
 .sec .row .arr { font-weight: 900; width: 16px; }
 .sec .row.in .arr { color: var(--blue); }
@@ -300,6 +315,8 @@ b, strong { font-weight: 700; }
 .status-pill.overdue { border-color: var(--red); color: var(--maroon); background: #fde3e3; font-weight: 700; }
 .status-pill.warn { border-color: var(--rule); background: var(--tan); color: var(--ink); }
 .status-pill.q { border-color: var(--maroon); color: var(--maroon); font-weight: 700; }
+.status-pill.done { background: var(--olive); color: var(--ink); font-weight: 700; }
+.item.selected { outline: 2px solid var(--blue); outline-offset: 1px; }
 
 /* ---------- edit form ---------- */
 .form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin-top: 8px; font-size: 13px; }
@@ -366,7 +383,8 @@ b, strong { font-weight: 700; }
 .brain-input { flex: 1; min-width: 160px; padding: 7px 9px; border: 1px solid var(--rule); border-radius: 5px; }
 
 /* ---------- toast ---------- */
-.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #fff; color: var(--ink); border: 1.5px solid var(--rule); padding: 8px 14px; border-radius: 6px; font-size: 13px; box-shadow: 3px 3px 0 rgba(0,0,0,.25); z-index: 70; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #fff; color: var(--ink); border: 1.5px solid var(--rule); padding: 8px 14px; border-radius: 6px; font-size: 13px; box-shadow: 3px 3px 0 rgba(0,0,0,.25); z-index: 70; display: flex; align-items: center; gap: 12px; max-width: min(640px, calc(100vw - 24px)); }
+.toast .btn.undo { background: var(--tan); font-weight: 800; flex: none; }
 
 /* ---------- mini mode (always-on-top "today" strip) ---------- */
 .miniwin { padding: 10px 12px; font-size: 14px; background: var(--page); color: var(--ink); min-height: 100vh; font-family: "Inter", "Segoe UI", sans-serif; }

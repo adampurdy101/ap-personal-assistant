@@ -11,7 +11,7 @@ in the Supabase table `fm_rules`, not here. (The `fm_` table prefix is historica
 ## Pieces
 | Piece | Does | Lives |
 |---|---|---|
-| App | Panel left (Next up · Status · Today · Meetings · Promises · Tasks · Quick look), calendar right (Month/Week/Day · Work/Home/Both), Quick add, Tell Assistant, Tomorrow, Balance week | `index.html`, `css/app.css`, `js/app.js` → GitHub Pages |
+| App | Panel left (Quick look · Next up · Status · Today · Meetings · Promises · Tasks), calendar right (Month/Week/Day · Work/Home/Both), Quick add, Tell Assistant, Add task, Balance week, Done log, Trash, Undo, Mini | `index.html`, `css/app.css`, `js/app.js` → GitHub Pages |
 | Brain | Instant filing and reshuffle from the mic / Tell Assistant / Balance week | Supabase edge function `ap-brain` (`supabase/functions/ap-brain`) |
 | Scheduled runs | "AP · morning plan" 5:30 a.m., "AP · end of day" 2:30 p.m., Mon–Fri | Claude scheduled tasks (read `fm_rules` for the rulebook) |
 | Meetings | Reads the owner's published work calendar (ICS) every 15 min; writes titles + times only | Supabase edge function `ap-meetings` + pg_cron job `ap-meetings-sync` |
@@ -49,10 +49,28 @@ a maroon "?" badge when size/priority are still guesses (click → 2-question po
 | promised_to | a person this is owed to; never moved without the owner's say-so |
 | nag_hours | 0 = none; else nag every N hours until done |
 | confirmed | true once the owner himself set size + priority; false = guessed (the app shows "?") |
+| deleted_at | set = in the Trash (hidden everywhere, Put back restores it); NULL = live. Rows in the Trash past 30 days are deleted for good on the next app load |
 | source | `app` · `quick` · `tomorrow` · `brain` · `claude` · `morning` · `eod` · `imported` · `gmail` |
 
 Every change the brain, the app controls or a scheduled run makes is logged in `fm_moves`
-(batch_id, kind add/move/update/complete/delete, before, after, reason) so Undo works.
+(batch_id, kind add/move/update/complete/delete/restore/purge/undo, before, after, reason) so Undo
+and "why did this move" both have an answer. App batches are `app-<date>`.
+
+## Done · Trash · Undo (v46, Nov 3 2026)
+- **Done** (✓ Done on a card, Next up, the mini window): status `done` + `done_at`. The chip stays on its
+  day, faded, ✓ in front, struck through, sorted last. Reopen puts it back. Done items never hide on their own.
+- **Remove** (× on a done chip, or Remove on any card): soft delete — `deleted_at` is set, the row leaves the
+  calendar and sits in the **Trash** (Status card → Trash) with Put back and Delete for good. The brain's
+  `delete_task` does the same. Nothing is hard-deleted except Delete for good / Empty trash / the 30-day sweep.
+- **Done log** (Status card → Done log): everything finished in the last 30 days, grouped by day, Trash included.
+- **Undo**: every change the app makes pushes an entry on a per-window undo stack (last 25) — the toast
+  carries an ↶ Undo button for 8 s, the Status card shows "↶ Undo: <last change>", and Ctrl+Z works outside
+  a text box. Brain batches land on the same stack (they call `undoLastBatch`).
+- Past-day stamp tells the truth: `DONE` when nothing is open on that day, else `N OPEN` (solid red).
+- Work tasks sent to a weekend / holiday / PTO day by → Tomorrow or → +1 week land on the next work day and the
+  toast says why; drag/drop or Pick a day onto such a day asks first.
+- Month scroll: the month in focus (white cells, title) only changes with ‹ › and Today. Scrolling peeks; a
+  "↕ viewing October" note shows by the title while scrolled away.
 
 ## Scheduling rules (summary)
 1. Nothing goes in without bucket, priority, size and a day.
@@ -76,8 +94,8 @@ Every change the brain, the app controls or a scheduled run makes is logged in `
 ## Brain tools
 `list_jobs`, `list_tasks`, `day_load` (tasks + attended meetings per day, OFF days, guessed items),
 `add_task`, `update_task` (moves need a reason; refuses promised items and past-drop-dead),
-`complete_task`, `delete_task`, `ask_adam` (max 3 A/B/C questions, then stop). Model from the
-`AP_MODEL` secret (falls back to `FOREMAN_MODEL`, default `claude-sonnet-4-5`). Anthropic key in Supabase Edge Function secrets only.
+`complete_task`, `delete_task` (soft: sets `deleted_at`), `ask_adam` (max 3 A/B/C questions, then stop). Every read skips `deleted_at` rows. Model from the
+`AP_MODEL` secret (default `claude-sonnet-4-5`). Anthropic key in Supabase Edge Function secrets only.
 
 ## Quick-add grammar
 `!!` or "urgent" · `!` or "high" · "low" · `#home` / `#work` · `@<job prefix>` ·
@@ -86,9 +104,15 @@ Every change the brain, the app controls or a scheduled run makes is logged in `
 ## Shipping a change
 Bump `?v=N` on `css/app.css` and `js/app.js` in `index.html` and `VERSION` in `sw.js` together. GitHub Pages caches files for 10 minutes; the query string makes the browser fetch the new copy right away. Installed-app windows check for new code on wake and every 15 min and reload themselves.
 
+Check before push: `test/run_tests.py` copies the site, swaps `js/supabase.js` for the in-memory double
+(`test/fake-supabase.js`), seeds it from `test/seed.json` (your own rows: titles and dates only — keep it
+out of the repo, it is gitignored), drives headless Chrome through the real flows (done / remove / trash /
+undo / quick add / add panel / moves across weekends and PTO / drag / views / phone) and drops screenshots in
+`test/shots/`. Needs `pip install playwright` and a Chrome binary.
+
 ## Stages
-1. Calendar, panel, quick add + mic, Tomorrow, brain, undo — done
+1. Calendar, panel, quick add + mic, Add task, brain, undo — done
 2. Scheduled runs (morning, end of day) — done
 3. Meetings on the calendar (Outlook feed direct, every 15 min) — done · days off — done
-4. Look v2 — done. Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge
+4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge
 5. Phone-first polish

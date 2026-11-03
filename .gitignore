@@ -1,0 +1,6 @@
+# test harness working files — the seed holds the owner's own rows
+test/seed.json
+test/site/
+test/shots/
+test/run.log
+__pycache__/

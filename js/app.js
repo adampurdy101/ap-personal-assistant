@@ -1,9 +1,12 @@
 // ============================================================
 //  AP PERSONAL ASSISTANT  ·  app.js
-//  Panel LEFT (Next Up · Status · Today · Meetings · Promises · Tasks · Quick Look),
+//  Panel LEFT (Quick Look · Next Up · Status · Today · Meetings · Promises · Tasks),
 //  calendar RIGHT (Month / Week / Day · Work / Home / Both). Quick add (type or
-//  speak), Tomorrow pencil-in, chip push arrows, "?" size/priority popover,
-//  Balance week. Data: Supabase fm_tasks / fm_jobs / fm_meetings / fm_moves.
+//  speak), Add task, chip push arrows, "?" size/priority popover, Balance week.
+//  Done stays on its day (faded, ✓) · Remove = Trash (30 days, Put back) · Undo on
+//  every change (toast button, Status card, Ctrl+Z). Nothing is hard-deleted except
+//  "Delete for good" inside the Trash.
+//  Data: Supabase fm_tasks / fm_jobs / fm_meetings / fm_moves.
 // ============================================================
 import { db } from "./supabase.js";
 import { CONFIG } from "./config.js";
@@ -51,11 +54,11 @@ const state = {
   panel: null,                                           // 'day' | 'unscheduled' | 'tomorrow' | null
   openId: null,                                          // expanded task id
   editId: null,                                          // task in edit mode
-  tasks: [],
+  tasks: [],                                             // live rows (deleted_at is null) — done ones included
+  trash: [],                                             // removed rows (deleted_at set); Put back brings them home
   jobs: [],
   meetings: [],                                          // PCI Outlook meetings (titles + times only)
   meetingsSync: null,
-  showDone: false,
   addDraft: "",                                          // Add task panel text, kept across redraws
   addPick: null,                                         // Add task panel choices (day, priority, size, calendar)
   tab: "week",                                           // phone: week · month · add · brain
@@ -67,12 +70,21 @@ const PHONE_MQ = window.matchMedia("(max-width: 740px), ((pointer: coarse) and (
 const isPhone = () => PHONE_MQ.matches;
 PHONE_MQ.addEventListener("change", () => render({ now: true }));
 
-function toast(msg) {
-  const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
-  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add("hidden"), 2200);
+// toast: a short line at the bottom. With { undo: true } it carries an ↶ Undo button
+// (the last change on the undo stack) and stays up long enough to hit it.
+function toast(msg, { undo: withUndo = false, ms = null } = {}) {
+  const t = $("toast"); t.innerHTML = ""; t.append(el("span", "", msg));
+  if (withUndo && undoStack.length) {
+    const b = el("button", "btn sm undo", "↶ Undo"); b.type = "button";
+    b.addEventListener("click", () => { t.classList.add("hidden"); undoLast(); });
+    t.append(b);
+  }
+  t.classList.remove("hidden");
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add("hidden"), ms || (withUndo ? 8000 : 2400));
 }
 
 // ---------- data ----------
+const TRASH_DAYS = 30;   // removed items wait this long in the Trash, then go for good
 async function loadAll() {
   const from = iso(addDays(new Date(), -45)), to = iso(addDays(new Date(), 120));
   const [t, j, m] = await Promise.all([
@@ -81,20 +93,77 @@ async function loadAll() {
     db.from("fm_meetings").select("id,title,start_at,end_at,all_day,attending,day,updated_at,source").gte("day", from).lte("day", to).order("start_at"),
   ]);
   if (t.error) { toast("Load failed: " + t.error.message); return; }
-  state.tasks = t.data || [];
+  const rows = t.data || [];
+  state.tasks = rows.filter((x) => !x.deleted_at);
+  state.trash = rows.filter((x) => !!x.deleted_at).sort((a, b) => String(b.deleted_at).localeCompare(String(a.deleted_at)));
   state.jobs = j.data || [];
   if (!m.error) {
     state.meetings = m.data || [];
     state.meetingsSync = state.meetings.reduce((a, x) => (x.updated_at > a ? x.updated_at : a), "") || null;
   }
+  purgeOldTrash();
   render();
 }
 
-async function saveTask(id, patch) {
-  const { error } = await db.from("fm_tasks").update(patch).eq("id", id);
+// once per session: anything that has sat in the Trash past TRASH_DAYS goes for good
+function purgeOldTrash() {
+  if (purgeOldTrash._done) return; purgeOldTrash._done = true;
+  const cutoff = new Date(Date.now() - TRASH_DAYS * 86400000).toISOString();
+  const old = state.trash.filter((x) => x.deleted_at < cutoff);
+  if (!old.length) return;
+  db.from("fm_tasks").delete().in("id", old.map((x) => x.id)).then(() => { state.trash = state.trash.filter((x) => x.deleted_at >= cutoff); }, () => {});
+}
+
+// ---------- change log + undo ----------
+// Every change the app makes is written to fm_moves (batch app-<date>) with a one-line
+// reason, like the brain and the scheduled runs do — so "why did this move" has an answer.
+async function logApp(kind, t, before, after, reason) {
+  return db.from("fm_moves").insert({ batch_id: "app-" + todayISO(), kind, task_id: t.id, before, after, reason,
+    from_date: before?.scheduled_date ?? null, to_date: after?.scheduled_date ?? null }).then(() => {}, () => {});
+}
+// The undo stack lives in this window for the session: the last 25 changes he made here.
+const undoStack = [];   // { label, revert: async () => boolean, at }
+function pushUndo(label, revert) { undoStack.push({ label, revert, at: Date.now() }); if (undoStack.length > 25) undoStack.shift(); }
+async function undoLast() {
+  const u = undoStack.pop();
+  if (!u) { toast("Nothing to undo"); return false; }
+  const ok = await u.revert();
+  if (ok !== false) toast(`Undid: ${u.label}`);
+  render();
+  return ok !== false;
+}
+const whenShort = (ts) => ts ? new Date(ts).toLocaleString("en-US", { weekday: "short", hour: "numeric", minute: "2-digit" }).replace(":00", "").replace(" AM", "a").replace(" PM", "p") : "";
+// keep a row in the right list (live vs trash) after deleted_at changes
+function placeRow(t) {
+  state.tasks = state.tasks.filter((x) => x.id !== t.id);
+  state.trash = state.trash.filter((x) => x.id !== t.id);
+  if (t.deleted_at) { state.trash.unshift(t); if (state.openId === t.id) state.openId = null; }
+  else state.tasks.push(t);
+}
+
+// The one way the app changes a task: patch → log → undo entry → redraw.
+async function patchTask(t, patch, { kind = "update", reason = "", label = null, undoable = true } = {}) {
+  const before = {}; for (const k of Object.keys(patch)) before[k] = t[k] ?? null;
+  const { error } = await db.from("fm_tasks").update(patch).eq("id", t.id);
   if (error) { toast("Save failed: " + error.message); return false; }
-  const t = state.tasks.find((x) => x.id === id);
-  if (t) Object.assign(t, patch);
+  Object.assign(t, patch);
+  if ("deleted_at" in patch) placeRow(t);
+  logApp(kind, t, before, patch, reason);
+  if (undoable && label) pushUndo(label, () => patchTask(t, before, { kind: "undo", reason: "Undo: " + label, undoable: false }));
+  render();
+  return true;
+}
+// the actions he presses most — each one logs with a reason and can be undone
+const markDone = (t) => patchTask(t, { status: "done", done_at: new Date().toISOString() }, { kind: "complete", reason: "Done — marked in the app", label: `Done "${t.title}"` });
+const reopen = (t) => patchTask(t, { status: "not_started", done_at: null }, { kind: "update", reason: "Reopened in the app", label: `Reopen "${t.title}"` });
+const removeTask = (t) => patchTask(t, { deleted_at: new Date().toISOString() }, { kind: "delete", reason: "Removed in the app → Trash", label: `Remove "${t.title}"` });
+const putBack = (t) => patchTask(t, { deleted_at: null }, { kind: "restore", reason: "Put back from the Trash", label: `Put back "${t.title}"` });
+async function deleteForGood(t) {
+  if (!confirm(`Delete "${t.title}" for good? This one can't be undone.`)) return false;
+  const { error } = await db.from("fm_tasks").delete().eq("id", t.id);
+  if (error) { toast("Delete failed: " + error.message); return false; }
+  state.trash = state.trash.filter((x) => x.id !== t.id);
+  db.from("fm_moves").insert({ batch_id: "app-" + todayISO(), kind: "purge", task_id: null, before: t, after: null, reason: "Deleted for good from the Trash" }).then(() => {}, () => {});
   render();
   return true;
 }
@@ -103,16 +172,10 @@ async function insertTask(row) {
   const { data, error } = await db.from("fm_tasks").insert(row).select().single();
   if (error) { toast("Add failed: " + error.message); return null; }
   state.tasks.push(data);
+  logApp("add", data, null, data, row.source === "quick" ? "Quick add" : "Added in the app");
+  pushUndo(`Add "${data.title}"`, () => patchTask(data, { deleted_at: new Date().toISOString() }, { kind: "delete", reason: "Undo: add", undoable: false }));
   render();
   return data;
-}
-
-async function deleteTask(id) {
-  const { error } = await db.from("fm_tasks").delete().eq("id", id);
-  if (error) { toast("Delete failed: " + error.message); return; }
-  state.tasks = state.tasks.filter((t) => t.id !== id);
-  if (state.openId === id) state.openId = null;
-  render();
 }
 
 // realtime: if Claude (or another window) changes a task, this window follows
@@ -156,9 +219,19 @@ setInterval(() => { if (refreshQueued && !userIsTyping()) refresh(); }, 2000);
 
 // ---------- derived ----------
 const inBucket = (t) => state.bucket === "both" || t.bucket === state.bucket;
-const visible = (t) => inBucket(t) && (state.showDone || t.status !== "done");
+// done items stay visible on their day (faded, ✓) — the Trash is the only thing that hides a task
+const visible = (t) => inBucket(t);
+const isDone = (t) => t.status === "done";
 const tasksOn = (dateISO) => state.tasks.filter((t) => visible(t) && t.scheduled_date === dateISO).sort(dayOrder);
-const unscheduled = () => state.tasks.filter((t) => visible(t) && !t.scheduled_date).sort(byPriority);
+const openOn = (dateISO) => tasksOn(dateISO).filter((t) => !isDone(t));
+const unscheduled = () => state.tasks.filter((t) => visible(t) && !t.scheduled_date && !isDone(t)).sort(byPriority);
+// done in the last N days (newest first), the Trash included so "did I finish that?" always has an answer
+const doneLog = (days = TRASH_DAYS) => {
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+  return [...state.tasks, ...state.trash].filter((t) => inBucket(t) && isDone(t) && t.done_at && t.done_at >= cutoff).sort((a, b) => String(b.done_at).localeCompare(String(a.done_at)));
+};
+const doneThisWeek = () => { const s = iso(weekStart(new Date())); return doneLog(8).filter((t) => iso(new Date(t.done_at)) >= s).length; };
+const trashItems = () => state.trash.filter(inBucket);
 // ---------- meetings (PCI Outlook, read-only, work calendar) + off days ----------
 const SIZE_HRS = { "15m": 0.25, "1h": 1, half: 4, full: 8 };
 const DAY_HRS = 8;
@@ -197,25 +270,24 @@ function nextDay(fromISOStr, dir, bucket) {
   }
   return iso(d);
 }
+// where a work task lands if it is pointed at a day that holds no work (weekend, holiday, PTO): the next work day
+const landDay = (dISO, bucket) => (bucket === "work" && dayCapacity(dISO) === 0) ? nextDay(dISO, 1, bucket) : dISO;
+const whyOff = (dISO) => offOn(dISO).length ? `off (${offOn(dISO).map((m) => m.title).join(", ")})` : isWeekend(dISO) ? "the weekend" : "";
 // move a task and log it like the brain does, so Undo and "why" work the same way
 async function moveTask(t, toISO, reason, { ask = true } = {}) {
   if (!toISO || toISO === t.scheduled_date) return false;
   if (ask && t.promised_to && !confirm(`"${t.title}" is promised to ${t.promised_to}. Move it anyway?`)) return false;
   if (ask && t.dropdead_date && toISO > t.dropdead_date && !confirm(`That is past its drop-dead (${fmtShort(t.dropdead_date)}). Move it anyway?`)) return false;
-  const before = { ...t };
-  const patch = { scheduled_date: toISO, planned: false };
-  const { error } = await db.from("fm_tasks").update(patch).eq("id", t.id);
-  if (error) { toast("Move failed: " + error.message); return false; }
-  Object.assign(t, patch);
-  const after = { ...t };
-  await db.from("fm_moves").insert({ batch_id: "app-" + todayISO(), kind: "move", task_id: t.id, before, after, reason, from_date: before.scheduled_date, to_date: toISO }).then(() => {}, () => {});
-  render();
-  return true;
+  if (ask && t.bucket === "work" && dayCapacity(toISO) === 0 && !confirm(`${fmtShort(toISO)} is ${whyOff(toISO)} — no work goes there. Put it there anyway?\n(Cancel, then use ‹ › or Pick a day for a work day.)`)) return false;
+  const from = t.scheduled_date;
+  const ok = await patchTask(t, { scheduled_date: toISO, planned: false }, { kind: "move", reason, label: `Move "${t.title}" ${from ? fmtShort(from) : "inbox"} → ${fmtShort(toISO)}` });
+  return ok;
 }
-// order of a day (rulebook 5.3): urgent → promises due → drop-deads within 2 days → planned → high → normal → low
+// order of a day (rulebook 5.3): urgent → promises due → drop-deads within 2 days → planned → high → normal → low · done last
 function dayOrder(a, b) {
   const r = (t) => {
     const today = todayISO(), soon = iso(addDays(new Date(), 2));
+    if (isDone(t)) return 9;
     if (t.priority === "urgent") return 0;
     if (t.promised_to && (!t.dropdead_date || t.dropdead_date <= soon)) return 1;
     if (t.dropdead_date && t.dropdead_date <= soon) return 2;
@@ -284,7 +356,7 @@ function byPriority(a, b) {
 // one short status line per task: never color alone
 function statusLine(t) {
   const today = todayISO();
-  if (t.status === "done") return { text: "Done", cls: "" };
+  if (t.status === "done") return { text: "✓ Done" + (t.done_at ? " · " + whenShort(t.done_at) : ""), cls: "done" };
   if (t.dropdead_date && t.dropdead_date < today) return { text: `Overdue ${daysBetween(t.dropdead_date, today)}d`, cls: "overdue" };
   if (t.status === "waiting") return { text: `Waiting on ${t.waiting_on || "…"}`, cls: "warn" };
   if (t.target_date && t.target_date < today) return { text: "Target missed", cls: "warn" };
@@ -293,7 +365,7 @@ function statusLine(t) {
 }
 
 function tooltip(t) {
-  const parts = [`${PRI[t.priority].label}`, STATUS[t.status]];
+  const parts = [`${PRI[t.priority].label}`, isDone(t) ? "Done " + whenShort(t.done_at) : STATUS[t.status]];
   if (t.job) parts.push(t.job);
   if (t.target_date) parts.push("Target " + fmtShort(t.target_date));
   if (t.dropdead_date) parts.push("Drop-dead " + fmtShort(t.dropdead_date));
@@ -337,24 +409,31 @@ function renderCalendar() {
 }
 
 function chipFor(t) {
-  const c = el("span", `chip p-${t.priority}` + (t.planned ? " planned" : "") + (t.bucket === "home" && state.bucket === "both" ? " bucket-home" : "") + (t.status === "done" ? " is-done" : ""));
-  c.append(el("span", "sym", PRI[t.priority].mark));
-  if (!t.confirmed && t.status !== "done") {
+  const done = isDone(t);
+  const c = el("span", `chip p-${t.priority}` + (t.planned ? " planned" : "") + (t.bucket === "home" && state.bucket === "both" ? " bucket-home" : "") + (done ? " is-done" : ""));
+  c.append(el("span", "sym", done ? "✓" : PRI[t.priority].mark));
+  if (!t.confirmed && !done) {
     const q = el("span", "q", "?");
     q.title = "I guessed the size and priority — click to set them";
     q.addEventListener("click", (e) => { e.stopPropagation(); openQuickFix(t, c); });
     c.append(q);
   }
   c.append(document.createTextNode(t.title));
-  if (t.scheduled_date && t.status !== "done") {
+  if (t.scheduled_date && !done) {
     const l = el("span", "mv l", "‹"); l.title = "Push a day earlier";
     const r = el("span", "mv r", "›"); r.title = "Push a day later";
     l.addEventListener("click", (e) => { e.stopPropagation(); moveTask(t, nextDay(t.scheduled_date, -1, t.bucket), "Pushed a day earlier with the chip arrow"); });
     r.addEventListener("click", (e) => { e.stopPropagation(); moveTask(t, nextDay(t.scheduled_date, 1, t.bucket), "Pushed a day later with the chip arrow"); });
     c.append(l, r);
   }
-  c.title = tooltip(t) + (t.confirmed ? "" : " · size/priority guessed (?)");
-  c.draggable = true;
+  if (done) {   // second click on a finished item: clear it off the day → Trash (Put back any time)
+    const x = el("span", "mv x", "×"); x.title = "Remove from this day — it goes to the Trash (Put back any time)";
+    x.setAttribute("aria-label", "Remove from this day");
+    x.addEventListener("click", async (e) => { e.stopPropagation(); if (await removeTask(t)) toast(`Removed "${t.title}" — it's in the Trash`, { undo: true }); });
+    c.append(x);
+  }
+  c.title = tooltip(t) + (t.confirmed || done ? "" : " · size/priority guessed (?)") + (done ? " · click × to clear it off the day" : "");
+  c.draggable = !done;
   c.dataset.id = t.id;
   c.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/plain", String(t.id)); e.dataTransfer.effectAllowed = "move"; });
   c.addEventListener("click", (e) => { e.stopPropagation(); openDay(t.scheduled_date, t.id); });
@@ -446,7 +525,7 @@ function openQuickFix(t, anchor) {
     const patch = { size, priority: pick.priority, confirmed: true };
     if (note) patch.notes = (t.notes ? t.notes + "\n" : "") + note;
     closeQuickFix();
-    if (await saveTask(t.id, patch)) toast(`Set: ${SIZE[size]} · ${PRI[pick.priority].label}`);
+    if (await patchTask(t, patch, { reason: "Adam set size + priority (the ? badge)", label: `Set size/priority on "${t.title}"` })) toast(`Set: ${SIZE[size]} · ${PRI[pick.priority].label}`, { undo: true });
   });
   pris.append(save);
   p.addEventListener("click", (e) => e.stopPropagation());
@@ -461,11 +540,18 @@ function dayCell(d, { other = false, max = 4, fit = 0 } = {}) {
   if (other) cell.classList.add("other");
   if (d.getDay() === 0 || d.getDay() === 6) cell.classList.add("weekend");
   const isToday = dISO === todayISO();
+  const items = tasksOn(dISO);
   if (isToday) cell.classList.add("today");
-  else if (dISO < todayISO()) { cell.classList.add("past"); cell.append(el("span", "stamp", "DONE")); }
+  else if (dISO < todayISO()) {
+    // the stamp tells the truth: DONE when nothing is left open on that day, else how many are still open
+    cell.classList.add("past");
+    const left = items.filter((t) => !isDone(t)).length;
+    const st = el("span", "stamp" + (left ? " open" : ""), left ? `${left} OPEN` : "DONE");
+    st.title = left ? `${left} item${left === 1 ? "" : "s"} on this past day still open — finish or move them` : "Nothing left open on this day";
+    cell.append(st);
+  }
   if (dISO === state.selected && state.panel === "day") cell.classList.add("selected");
 
-  const items = tasksOn(dISO);
   const num = el("div", "num");
   const numLabel = el("span", "", String(d.getDate()));
   if (isToday) numLabel.append(el("b", "today-tag", "TODAY"));
@@ -529,17 +615,20 @@ function dayCell(d, { other = false, max = 4, fit = 0 } = {}) {
     e.preventDefault(); cell.classList.remove("drop");
     const id = Number(e.dataTransfer.getData("text/plain"));
     const t = state.tasks.find((x) => x.id === id);
-    if (t && await moveTask(t, dISO, "Dragged to " + fmtShort(dISO))) toast("Moved to " + fmtShort(dISO));
+    if (t && await moveTask(t, dISO, "Dragged to " + fmtShort(dISO))) toast("Moved to " + fmtShort(dISO), { undo: true });
   });
   return cell;
 }
 
 // Month view = one continuous run of weeks. Scroll wheel / scrollbar slides
-// partway into next or prior months; the title follows the month on screen.
-// Built ONCE for a wide window (±12 months). Scrolling never rebuilds the DOM:
-// running out of weeks just appends/prepends more rows. Data refreshes that
-// land mid-scroll wait until the scroll settles (a rebuild mid-drag snaps the
-// scrollbar back).
+// partway into next or prior months to peek. The month in focus (white cells,
+// the title) is anchored: it only changes with ‹ › and Today, never by scrolling —
+// scrolling used to flip the focus and turn the current month tan mid-screen.
+// While he is scrolled into another month a small "viewing October" note shows
+// by the title. Built ONCE for a wide window (±12 months). Scrolling never
+// rebuilds the DOM: running out of weeks just appends/prepends more rows. Data
+// refreshes that land mid-scroll wait until the scroll settles (a rebuild
+// mid-drag snaps the scrollbar back).
 const firstOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
 const monthRows = (m) => Math.ceil((m.getDay() + new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate()) / 7);
 const sameMonth = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
@@ -595,6 +684,7 @@ function renderMonth(body) {
   scroller.append(frag);
   M.scroller = scroller; M.head = head; M.first = winStart; M.last = addDays(winStart, weeks * 7);
   $("cal-title").textContent = focus.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  setPeek(null);
 
   // Land: explicit jump (arrows / Today) or the same spot as before the redraw.
   const rowFor = (dISO) => scroller.querySelector(`.mweek[data-start="${iso(weekStart(fromISO(dISO)))}"]`);
@@ -626,18 +716,15 @@ function monthOnScroll() {
   const topRow = rows[idx];
   state.mTop = { iso: topRow.dataset.start, off: top - (topRow.offsetTop - head.offsetHeight) };
 
-  // Focus = the month owning the day a third of the way down the screen.
+  // The month a third of the way down the screen. The focus month (white cells, the title)
+  // does NOT follow it — only a small note by the title says where he has scrolled to.
   const probeIdx = Math.min(rows.length - 1, Math.floor((top - firstTop + (sc.clientHeight - head.offsetHeight) / 3) / rowH));
   const f = firstOfMonth(addDays(fromISO(rows[probeIdx].dataset.start), 3));
-  if (!sameMonth(f, state.cursor)) {
-    state.cursor = f;
-    $("cal-title").textContent = f.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-    const key = monthKey(f);
-    sc.querySelectorAll(".day").forEach((c) => c.classList.toggle("other", c.dataset.month !== key));
-  }
+  const focus = firstOfMonth(state.cursor);
+  setPeek(sameMonth(f, focus) ? null : f);
 
   // Running out of weeks? Add more rows — no rebuild, no jump.
-  const max = monthRows(f) >= 6 ? 3 : 4, key = monthKey(f), ADD = 12;
+  const max = monthRows(focus) >= 6 ? 3 : 4, key = monthKey(focus), ADD = 12;
   if (sc.scrollHeight - top - sc.clientHeight < sc.clientHeight * 2) {
     const frag = document.createDocumentFragment();
     for (let w = 0; w < ADD; w++) frag.append(weekRow(addDays(M.last, w * 7), key, max));
@@ -650,6 +737,14 @@ function monthOnScroll() {
     M.first = newFirst; head.after(frag);
     sc.scrollTop = top + ADD * rowH;
   }
+}
+
+// "viewing October" note by the month title while he is scrolled away from the focus month
+function setPeek(m) {
+  const p = $("cal-peek"); if (!p) return;
+  if (!m) { p.classList.add("hidden"); p.textContent = ""; return; }
+  p.textContent = `↕ viewing ${m.toLocaleDateString("en-US", { month: "long", year: m.getFullYear() === state.cursor.getFullYear() ? undefined : "numeric" })} — Today or ‹ › to move`;
+  p.classList.remove("hidden");
 }
 
 function weekStart(d) { return addDays(d, -d.getDay()); }
@@ -685,6 +780,8 @@ function renderRail() {
   if (!state.panel) renderQuickLook(r);   // first thing in the general view only
   if (state.panel === "day" && state.selected) return renderDayPanel(r);
   if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
+  if (state.panel === "done") return renderDonePanel(r);
+  if (state.panel === "trash") return renderTrashPanel(r);
   if (state.panel === "add") return renderAddPanel(r);
   if (state.panel === "brain") return renderBrainPanel(r);
   renderSkinny(r);
@@ -723,7 +820,15 @@ async function askBrain(text) {
     brain.history = brain.history.slice(-10);
     brain.log.push({ who: "ap", text: out.reply || "(no reply)", actions: out.actions || [], questions: out.questions || null, error: !!out.error });
     if (out.pending) { brain.batch = out.batch_id; brain.questions = out.questions; }
-    else { brain.batch = null; if ((out.actions || []).length) brain.lastBatch = out.batch_id; }
+    else {
+      brain.batch = null;
+      const n = (out.actions || []).length;
+      if (n) {
+        brain.lastBatch = out.batch_id;
+        const id = out.batch_id;
+        pushUndo(`Assistant's ${n} change${n === 1 ? "" : "s"}`, async () => { if (brain.lastBatch !== id) { toast("That one was already undone"); return false; } return undoLastBatch(); });
+      }
+    }
   } catch (e) {
     const why = e.name === "AbortError" ? "it took too long" : (e.message || String(e));
     brain.log.push({ who: "ap", text: `Didn't get through (${why}). Say it again or press Retry.`, error: true, retry: text });
@@ -740,22 +845,23 @@ function answerQuestions(answers) {
 }
 
 async function undoLastBatch() {
-  if (!brain.lastBatch) return;
+  if (!brain.lastBatch) return false;
   const { data: moves, error } = await db.from("fm_moves").select("*").eq("batch_id", brain.lastBatch).order("id", { ascending: false });
-  if (error || !moves?.length) { toast("Nothing to undo"); return; }
+  if (error || !moves?.length) { toast("Nothing to undo"); return false; }
+  const stamp = new Date().toISOString();
   for (const m of moves) {
-    if (m.kind === "add" && m.task_id) await db.from("fm_tasks").delete().eq("id", m.task_id);
+    if (m.kind === "add" && m.task_id) await db.from("fm_tasks").update({ deleted_at: stamp }).eq("id", m.task_id);   // to the Trash, not gone
     else if ((m.kind === "move" || m.kind === "update" || m.kind === "complete") && m.task_id && m.before) {
       const b = { ...m.before }; delete b.id; if (m.kind === "complete") b.done_at = null;
       await db.from("fm_tasks").update(b).eq("id", m.task_id);
-    } else if (m.kind === "delete" && m.before) {
-      const b = { ...m.before }; delete b.id; await db.from("fm_tasks").insert(b);
-    }
+    } else if (m.kind === "delete" && m.task_id) await db.from("fm_tasks").update({ deleted_at: null }).eq("id", m.task_id);   // back from the Trash
+    else if (m.kind === "delete" && m.before) { const b = { ...m.before }; delete b.id; await db.from("fm_tasks").insert(b); }   // older hard deletes
   }
   await db.from("fm_moves").delete().eq("batch_id", brain.lastBatch);
   brain.log.push({ who: "ap", text: `Undid ${moves.length} change${moves.length === 1 ? "" : "s"}.` });
   brain.lastBatch = null;
   await loadAll();
+  return true;
 }
 
 function renderBrainPanel(r) {
@@ -774,7 +880,8 @@ function renderBrainPanel(r) {
         else if (a.kind === "move") line = `Moved "${a.title}" ${a.from ? fmtShort(a.from) : "unscheduled"} → ${a.to ? fmtShort(a.to) : "unscheduled"}${a.reason ? ": " + a.reason : ""}`;
         else if (a.kind === "update") line = `Updated "${a.title}"${a.reason ? ": " + a.reason : ""}`;
         else if (a.kind === "complete") line = `Done: "${a.title}"`;
-        else if (a.kind === "delete") line = `Deleted "${a.title}"`;
+        else if (a.kind === "delete") line = `Removed "${a.title}" (it's in the Trash)`;
+        else if (a.kind === "restore") line = `Put back "${a.title}"`;
         ul.append(el("li", "", line));
       });
       b.append(ul);
@@ -834,10 +941,10 @@ function card(r, label, { sub = "", cls = "" } = {}) {
   return s;
 }
 function rowFor(sec, t, { when = "" } = {}) {
-  const row = el("div", "row link");
-  row.append(el("span", "sym" + (t.priority === "urgent" ? " u" : ""), PRI[t.priority].mark));
+  const row = el("div", "row link" + (isDone(t) ? " done" : ""));
+  row.append(el("span", "sym" + (isDone(t) ? " ok" : t.priority === "urgent" ? " u" : ""), isDone(t) ? "✓" : PRI[t.priority].mark));
   if (!t.confirmed && t.status !== "done") { const q = el("span", "sym q", "?"); q.title = "size/priority guessed — click the ? on its chip to set"; row.append(q); }
-  row.append(document.createTextNode(t.title));
+  row.append(el("span", "tt", t.title));
   const s = statusLine(t);
   if (s.text !== "Not started") row.append(el("i", "", s.text));
   if (t.job) row.append(el("i", "", t.job));
@@ -889,9 +996,9 @@ function renderSkinny(r) {
     row.addEventListener("click", () => openDay(today, nx.id));
     sNext.append(row);
     const bt = el("div", "nxbtn");
-    const ok = el("button", "btn ok", "✓ Done"); ok.addEventListener("click", () => saveTask(nx.id, { status: "done", done_at: new Date().toISOString() }));
+    const ok = el("button", "btn ok", "✓ Done"); ok.addEventListener("click", async () => { if (await markDone(nx)) toast(`Done: "${nx.title}" — it stays on today, faded`, { undo: true }); });
     const push = el("button", "btn push", "Push →"); push.title = "Move it to the next work day";
-    push.addEventListener("click", async () => { const to = nextDay(today, 1, nx.bucket); if (await moveTask(nx, to, "Pushed from Next up")) toast(`Pushed to ${fmtShort(to)}`); });
+    push.addEventListener("click", async () => { const to = nextDay(today, 1, nx.bucket); if (await moveTask(nx, to, "Pushed from Next up")) toast(`Pushed to ${fmtShort(to)}`, { undo: true }); });
     const more = el("button", "btn", "More…"); more.addEventListener("click", () => openDay(today, nx.id));
     bt.append(ok, push, more);
     if (!nx.confirmed) { const fix = el("button", "btn", "? Set size"); fix.title = "I guessed the size and priority"; fix.addEventListener("click", () => openQuickFix(nx, fix)); bt.append(fix); }
@@ -919,6 +1026,15 @@ function renderSkinny(r) {
   const inbox = el("div", "row link"); inbox.append(el("b", "", `Inbox: ${un.length} unscheduled`), el("i", "", un.length ? "give each a day →" : ""));
   inbox.addEventListener("click", () => openUnscheduled());
   sStat.append(inbox);
+  doneTrashRows(sStat);
+  // the last change he made here, with the way back
+  if (undoStack.length) {
+    const u = undoStack[undoStack.length - 1];
+    const row = el("div", "row undo");
+    const b = el("button", "btn sm", "↶ Undo"); b.title = "Ctrl+Z works too"; b.addEventListener("click", undoLast);
+    row.append(b, el("span", "ulab", u.label));
+    sStat.append(row);
+  }
 
   // 3. TODAY — 7 to 4 timeline
   const L = dayLoad(today);
@@ -992,18 +1108,84 @@ function renderSkinny(r) {
   }
 
   // 6. TASKS (today)
-  const sT = card(r, `Tasks · ${open.length}`, { sub: todayItems.length - open.length ? `${todayItems.length - open.length} done` : "" });
+  const sT = card(r, `Tasks · ${open.length} open`, { sub: todayItems.length - open.length ? `${todayItems.length - open.length} done today` : "" });
   todayItems.forEach((t) => rowFor(sT, t));
   if (!todayItems.length) sT.append(el("div", "empty", "Nothing scheduled today."));
-  const sd = el("label", "hint");
-  const cb = el("input"); cb.type = "checkbox"; cb.checked = state.showDone;
-  cb.addEventListener("change", () => { state.showDone = cb.checked; render(); });
-  sd.append(cb, " Show done items");
-  sT.append(sd);
   if (state.meetingsSync) sT.append(el("div", "hint", `Outlook checked ${new Date(state.meetingsSync).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} · every 15 min`));
-
-
 }
+
+// the two rows that answer "where did it go": the Done log and the Trash
+function doneTrashRows(sec) {
+  const dn = doneThisWeek(), tr = trashItems().length;
+  const done = el("div", "row link"); done.append(el("b", "", `✓ Done log`), el("i", "", `${dn} this week · last ${TRASH_DAYS} days →`));
+  done.title = "Everything you finished, by day"; done.addEventListener("click", () => openPanel("done"));
+  const trash = el("div", "row link"); trash.append(el("b", "", `Trash`), el("i", "", tr ? `${tr} item${tr === 1 ? "" : "s"} · put back any time →` : "empty"));
+  trash.title = "Removed items wait here " + TRASH_DAYS + " days — Put back or Delete for good"; trash.addEventListener("click", () => openPanel("trash"));
+  sec.append(done, trash);
+}
+
+// ---------- Done log: what got finished, by day ----------
+function renderDonePanel(r) {
+  const items = doneLog();
+  panelHeader(r, "Done log", `${items.length} in the last ${TRASH_DAYS} days`);
+  if (!items.length) { const s = card(r, "Nothing finished yet"); s.append(el("div", "empty", "When you press ✓ Done on something, it lands here with the day and time.")); return; }
+  const byDay = new Map();
+  items.forEach((t) => { const k = iso(new Date(t.done_at)); if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(t); });
+  const today = todayISO(), yest = iso(addDays(new Date(), -1));
+  for (const [k, list] of byDay) {
+    const label = k === today ? "Today" : k === yest ? "Yesterday" : fmtLong(k);
+    const s = card(r, `${label} · ${list.length}`, { sub: list.map((t) => SIZE_HRS[t.size] ?? 1).reduce((a, b) => a + b, 0) + " h" });
+    list.forEach((t) => {
+      const row = el("div", "row link done");
+      row.append(el("span", "sym ok", "✓"), el("span", "tt", t.title));
+      row.append(el("i", "", whenShort(t.done_at).replace(/^\w+ /, "")));
+      if (t.job) row.append(el("i", "", t.job));
+      if (t.deleted_at) row.append(el("i", "", "in Trash"));
+      row.title = tooltip(t) + (t.deleted_at ? " · in the Trash" : "") + " — click to open";
+      row.addEventListener("click", () => t.deleted_at ? openPanel("trash", t.id) : t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
+      s.append(row);
+    });
+  }
+}
+
+// ---------- Trash: removed items, put back or gone for good ----------
+function renderTrashPanel(r) {
+  const items = trashItems();
+  panelHeader(r, "Trash", items.length ? `${items.length} item${items.length === 1 ? "" : "s"}` : "empty");
+  const s = card(r, "Removed items", { sub: `kept ${TRASH_DAYS} days, then deleted for good` });
+  if (!items.length) s.append(el("div", "empty", "Nothing here. Remove something from a day and it waits here — Put back brings it home."));
+  items.forEach((t) => {
+    const c = el("div", `item p-${t.priority}` + (isDone(t) ? " is-done" : "") + (state.openId === t.id ? " selected" : ""));
+    const head = el("div", "head");
+    head.append(el("span", `chip p-${t.priority}`, `${PRI[t.priority].mark} ${PRI[t.priority].label}`), el("span", "title", t.title));
+    if (isDone(t)) head.append(el("span", "status-pill done", "✓ Done"));
+    c.append(head);
+    const d = el("div", "detail");
+    d.textContent = `Removed ${whenShort(t.deleted_at)} · was on ${t.scheduled_date ? fmtShort(t.scheduled_date) : "no day (inbox)"} · ${t.bucket === "home" ? "Home" : "Work"}${t.job ? " · " + t.job : ""}`;
+    c.append(d);
+    const a = el("div", "actions r2");
+    const back = el("button", "btn sm olive", "↶ Put back"); back.title = "Back where it was" + (t.scheduled_date ? ` (${fmtShort(t.scheduled_date)})` : " (the Inbox)");
+    back.addEventListener("click", async () => { if (await putBack(t)) toast(`Put back "${t.title}"` + (t.scheduled_date ? ` on ${fmtShort(t.scheduled_date)}` : " in the Inbox"), { undo: true }); });
+    const gone = el("button", "btn sm danger", "Delete for good"); gone.addEventListener("click", () => deleteForGood(t));
+    a.append(back, gone); c.append(a);
+    s.append(c);
+  });
+  if (items.length > 1) {
+    const foot = el("div", "actions");
+    const all = el("button", "btn sm danger", `Empty trash (${items.length})`);
+    all.addEventListener("click", async () => {
+      if (!confirm(`Delete all ${items.length} items in the Trash for good? This can't be undone.`)) return;
+      const ids = items.map((t) => t.id);
+      const { error } = await db.from("fm_tasks").delete().in("id", ids);
+      if (error) { toast("Couldn't empty it: " + error.message); return; }
+      state.trash = state.trash.filter((t) => !ids.includes(t.id));
+      db.from("fm_moves").insert({ batch_id: "app-" + todayISO(), kind: "purge", task_id: null, before: { count: ids.length, titles: items.map((t) => t.title) }, after: null, reason: "Emptied the Trash" }).then(() => {}, () => {});
+      toast("Trash emptied"); render();
+    });
+    foot.append(all); s.append(foot);
+  }
+}
+function openPanel(which, taskId = null) { state.panel = which; state.openId = taskId; state.editId = null; render({ now: true }); const p = $("rail"); if (p) p.scrollTop = 0; }
 
 // ---------- PHONE ----------
 // One screen at a time in the panel box; the month grid on the right is hidden. Big type,
@@ -1020,6 +1202,8 @@ function renderPhone() {
   r.innerHTML = "";
   if (state.panel === "day" && state.selected) return renderDayPanel(r);
   if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
+  if (state.panel === "done") return renderDonePanel(r);
+  if (state.panel === "trash") return renderTrashPanel(r);
   if (state.panel === "add") return renderAddPanel(r);
   if (state.panel === "brain") return renderBrainPanel(r);
   if (state.tab === "month") return renderPhoneMonth(r);
@@ -1036,17 +1220,19 @@ function phoneTab(tab) {
 }
 // a task as one full-width line: mark · title · the one thing that matters (est. time / promise / drop-dead / status)
 function phoneChip(t) {
-  const c = el("div", `pchip p-${t.priority}` + (t.planned ? " planned" : "") + (t.status === "done" ? " is-done" : "") + (t.bucket === "home" ? " bucket-home" : ""));
-  c.append(el("span", "sym", PRI[t.priority].mark));
+  const c = el("div", `pchip p-${t.priority}` + (t.planned ? " planned" : "") + (isDone(t) ? " is-done" : "") + (t.bucket === "home" ? " bucket-home" : ""));
+  c.append(el("span", "sym", isDone(t) ? "✓" : PRI[t.priority].mark));
   const body = el("div", "pt");
   body.append(el("div", "ttl", t.title));
   const bits = [];
-  if (t.dropdead_date) bits.push(t.dropdead_date === todayISO() ? "drop-dead today" : "drop-dead " + fmtShort(t.dropdead_date).replace(",", ""));
-  if (t.promised_to) bits.push("promised to " + t.promised_to);
-  if (t.status === "working") bits.push("working");
-  if (t.status === "waiting") bits.push("waiting on " + (t.waiting_on || "someone"));
-  if (t.status === "done") bits.push("done");
-  bits.push((SIZE[t.size] || "1 hr") + (t.confirmed ? "" : " ?"));
+  if (isDone(t)) bits.push("done " + whenShort(t.done_at));
+  else {
+    if (t.dropdead_date) bits.push(t.dropdead_date === todayISO() ? "drop-dead today" : "drop-dead " + fmtShort(t.dropdead_date).replace(",", ""));
+    if (t.promised_to) bits.push("promised to " + t.promised_to);
+    if (t.status === "working") bits.push("working");
+    if (t.status === "waiting") bits.push("waiting on " + (t.waiting_on || "someone"));
+    bits.push((SIZE[t.size] || "1 hr") + (t.confirmed ? "" : " ?"));
+  }
   body.append(el("div", "bits", bits.join(" · ")));
   c.append(body);
   c.addEventListener("click", () => openDay(t.scheduled_date, t.id));
@@ -1108,8 +1294,8 @@ function renderPhoneWeek(r) {
       row.addEventListener("click", () => openDay(today, nx.id));
       now.append(row);
       const bt = el("div", "nxbtn");
-      const ok = el("button", "btn ok", "✓ Done"); ok.addEventListener("click", () => saveTask(nx.id, { status: "done", done_at: new Date().toISOString() }));
-      const push = el("button", "btn push", "Push →"); push.addEventListener("click", async () => { const to = nextDay(today, 1, nx.bucket); if (await moveTask(nx, to, "Pushed from Next up")) toast(`Pushed to ${fmtShort(to)}`); });
+      const ok = el("button", "btn ok", "✓ Done"); ok.addEventListener("click", async () => { if (await markDone(nx)) toast(`Done: "${nx.title}"`, { undo: true }); });
+      const push = el("button", "btn push", "Push →"); push.addEventListener("click", async () => { const to = nextDay(today, 1, nx.bucket); if (await moveTask(nx, to, "Pushed from Next up")) toast(`Pushed to ${fmtShort(to)}`, { undo: true }); });
       bt.append(ok, push); now.append(bt);
     } else now.append(el("div", "pnx", tasksOn(today).length ? "Everything on today is done." : "Nothing on today."));
     if (showMeetings() && !offOn(today).length) now.append(el("div", "hint", L.over ? `!! ${fmtHrs(L.total)} on an 8 h day` : `${fmtHrs(L.total)} of 8 h booked`));
@@ -1122,6 +1308,8 @@ function renderPhoneWeek(r) {
   const un = unscheduled();
   const foot = el("div", "sec pfoot");
   const inbox = el("div", "row link"); inbox.append(el("b", "", `Inbox: ${un.length} unscheduled`), el("i", "", un.length ? "give each a day →" : "")); inbox.addEventListener("click", () => openUnscheduled()); foot.append(inbox);
+  doneTrashRows(foot);
+  if (undoStack.length) { const u = el("div", "row undo"); const b = el("button", "btn sm", "↶ Undo"); b.addEventListener("click", undoLast); u.append(b, el("span", "ulab", undoStack[undoStack.length - 1].label)); foot.append(u); }
   const out = el("div", "row"); const lo = el("button", "btn ghost sm", "Sign out"); lo.addEventListener("click", () => $("logout-btn").click()); out.append(lo, el("i", "", document.querySelector(".ver")?.textContent || "")); foot.append(out);
   r.append(foot);
   if (hasToday && !state.pWeek) requestAnimationFrame(() => { const t = r.querySelector(".pday.today"); if (t && t.getBoundingClientRect().top > window.innerHeight * 0.7) t.scrollIntoView({ block: "start" }); });
@@ -1219,12 +1407,13 @@ function renderDayPanel(r) {
       sM.append(box);
     }
   }
-  const sT = card(r, "Tasks", { sub: "click one for detail" });
+  const nDone = items.filter(isDone).length;
+  const sT = card(r, "Tasks", { sub: nDone ? `${items.length - nDone} open · ${nDone} done — click one for detail` : "click one for detail" });
   if (!items.length) sT.append(el("div", "empty", "Nothing here yet. Quick add puts new things on this day."));
   items.forEach((t) => sT.append(itemCard(t)));
   // coming up (next 5 days)
   const soon = [];
-  for (let i = 1; i <= 5; i++) { const dd = iso(addDays(fromISO(d), i)); tasksOn(dd).forEach((t) => soon.push(t)); }
+  for (let i = 1; i <= 5; i++) { const dd = iso(addDays(fromISO(d), i)); openOn(dd).forEach((t) => soon.push(t)); }
   if (soon.length) {
     const sC = card(r, "Coming up", { sub: "next 5 days" });
     soon.slice(0, 8).forEach((t) => rowFor(sC, t, { when: fmtShort(t.scheduled_date).split(",")[0] }));
@@ -1379,23 +1568,29 @@ function itemCard(t) {
       card.append(d);
 
       const btn = (label, fn, cls = "btn sm") => { const b = el("button", cls, label); if (fn) b.addEventListener("click", fn); return b; };
-      // Adam's layout: row 1 = Done · → Tomorrow · → +1 week · ▦ Pick a day (4 across) · row 2 = ✎ Edit · Delete
+      // a work task pointed at a weekend / day off lands on the next work day instead (and says so)
+      const moveTo = async (want, reason) => {
+        const to = landDay(want, t.bucket);
+        if (await moveTask(t, to, reason + (to !== want ? ` (${fmtShort(want)} is ${whyOff(want)})` : "")))
+          toast(to !== want ? `${fmtShort(want)} is ${whyOff(want)} → landed on ${fmtShort(to)}` : `Moved to ${fmtShort(to)}`, { undo: true });
+      };
+      // Adam's layout: row 1 = Done · → Tomorrow · → +1 week · ▦ Pick a day (4 across) · row 2 = ✎ Edit · Remove
       const r1 = el("div", "actions r4");
-      if (t.status !== "done") r1.append(btn("✓ Done", () => saveTask(t.id, { status: "done", done_at: new Date().toISOString() }), "btn sm olive"));
-      else r1.append(btn("Reopen", () => saveTask(t.id, { status: "not_started", done_at: null })));
-      { const m = btn("→ Tomorrow", () => moveTask(t, iso(addDays(new Date(), 1)), "Moved to tomorrow from the panel")); m.title = "Move it to tomorrow"; r1.append(m); }
-      { const m = btn("→ +1 week", () => moveTask(t, iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)), "Pushed a week from the panel")); m.title = "Move it a week later"; r1.append(m); }
+      if (!isDone(t)) r1.append(btn("✓ Done", async () => { if (await markDone(t)) toast(`Done: "${t.title}" — it stays on the day, faded`, { undo: true }); }, "btn sm olive"));
+      else r1.append(btn("Reopen", async () => { if (await reopen(t)) toast(`Reopened "${t.title}"`, { undo: true }); }));
+      { const m = btn("→ Tomorrow", () => moveTo(iso(addDays(new Date(), 1)), "Moved to tomorrow from the panel")); m.title = "Move it to tomorrow (work skips weekends and days off)"; r1.append(m); }
+      { const m = btn("→ +1 week", () => moveTo(iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)), "Pushed a week from the panel")); m.title = "Move it a week later"; r1.append(m); }
       { const c = btn("▦ Pick a day"); c.title = "Opens a calendar — click the day to move it there";
-        c.addEventListener("click", (e) => { e.stopPropagation(); openDatePop(c, t.scheduled_date, (d) => moveTask(t, d, `Moved to ${fmtShort(d)} from the panel calendar`)); }); r1.append(c); }
+        c.addEventListener("click", (e) => { e.stopPropagation(); openDatePop(c, t.scheduled_date, async (d) => { if (await moveTask(t, d, `Moved to ${fmtShort(d)} from the panel calendar`)) toast(`Moved to ${fmtShort(d)}`, { undo: true }); }); }); r1.append(c); }
       card.append(r1);
       const r2 = el("div", "actions r2");
       { const e = btn("✎ Edit", () => { state.editId = t.id; render(); }, "btn sm primary edit"); e.title = "Change anything on this item"; r2.append(e); }
-      r2.append(btn("Delete", async () => { if (confirm(`Delete "${t.title}"?`)) await deleteTask(t.id); }, "btn sm danger"));
+      { const x = btn("Remove", async () => { if (await removeTask(t)) toast(`Removed "${t.title}" — it's in the Trash for ${TRASH_DAYS} days`, { undo: true }); }, "btn sm danger"); x.title = "Off the calendar and into the Trash — Put back any time in the next " + TRASH_DAYS + " days"; r2.append(x); }
       card.append(r2);
       // only when they apply
       const r3 = el("div", "actions");
-      if (t.status === "not_started" || t.status === "waiting") r3.append(btn("Working", () => saveTask(t.id, { status: "working" })));
-      if (t.planned) r3.append(btn("Make it real", () => saveTask(t.id, { planned: false })));
+      if (t.status === "not_started" || t.status === "waiting") r3.append(btn("Working", () => patchTask(t, { status: "working" }, { reason: "Marked Working in the app", label: `Working on "${t.title}"` })));
+      if (t.planned) r3.append(btn("Make it real", () => patchTask(t, { planned: false }, { reason: "Planned → real, in the app", label: `Make "${t.title}" real` })));
       if (!t.confirmed && t.status !== "done") { const q = btn("? Set est. time + priority"); q.addEventListener("click", (e) => { e.stopPropagation(); openQuickFix(t, q); }); r3.append(q); }
       if (r3.children.length) card.append(r3);
     }
@@ -1460,7 +1655,7 @@ function editForm(t) {
     }
     patch.confirmed = true;   // Adam looked it over — the "?" comes off
     state.editId = null;
-    if (await saveTask(t.id, patch)) toast("Saved");
+    if (await patchTask(t, patch, { kind: patch.scheduled_date !== (t.scheduled_date || null) ? "move" : "update", reason: "Edited in the app", label: `Edit "${patch.title}"` })) toast("Saved", { undo: true });
   });
   return f;
 }
@@ -1734,7 +1929,7 @@ function renderMini(root) {
   const host = root || (miniWin && miniWin.document.getElementById("mini-root"));
   if (!host) return;
   const today = todayISO();
-  const items = state.tasks.filter((t) => t.scheduled_date === today && (t.status !== "done" || state.showDone)).sort(byPriority);
+  const items = state.tasks.filter((t) => t.scheduled_date === today).sort(dayOrder);
   const open = items.filter((t) => t.status !== "done");
   const L = dayLoad(today);
   host.innerHTML = "";
@@ -1752,7 +1947,7 @@ function renderMini(root) {
     const r = el("div", `mrow p-${t.priority}` + (t.status === "done" ? " done" : ""));
     r.append(el("span", "", PRI[t.priority].mark), el("span", "t", t.title), el("span", "sz", SIZE[t.size] || ""));
     const b = el("button", "", t.status === "done" ? "Reopen" : "✓ Done");
-    b.addEventListener("click", () => saveTask(t.id, t.status === "done" ? { status: "not_started", done_at: null } : { status: "done", done_at: new Date().toISOString() }));
+    b.addEventListener("click", () => (t.status === "done" ? reopen(t) : markDone(t)));
     r.append(b);
     host.append(r);
   });
@@ -1805,8 +2000,10 @@ function wire() {
   });
   $("quick-add").addEventListener("submit", async (e) => { e.preventDefault(); const v = $("quick-input").value.trim(); if (!v) return; $("quick-input").value = ""; await quickAdd(v); });
   document.addEventListener("keydown", (e) => {
+    const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
     if (e.key === "Escape") { if (popEl) closeQuickFix(); else if (state.editId) { state.editId = null; render(); } else if (state.panel) closePanel(); }
-    if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") { e.preventDefault(); $("quick-input").focus(); }
+    if (e.key === "/" && !typing) { e.preventDefault(); $("quick-input").focus(); }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && !typing) { e.preventDefault(); undoLast(); }   // Ctrl+Z = undo the last change
   });
   initMic();
   initFullscreen();

@@ -10,7 +10,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
-const MODEL = Deno.env.get("AP_MODEL") || Deno.env.get("FOREMAN_MODEL") || "claude-sonnet-4-5";
+const MODEL = Deno.env.get("AP_MODEL") || "claude-sonnet-4-5";
 const OWNER_IDS = new Set(["30cbcbfa-7261-47de-8c91-3d97557fc5f9"]);
 
 const ALLOW = ["https://adampurdy101.github.io", "http://localhost:4173", "http://127.0.0.1:4173", "http://localhost:8080"];
@@ -34,6 +34,7 @@ type DB = ReturnType<typeof userClient>;
 const SIZE_HOURS: Record<string, number> = { "15m": 0.25, "1h": 1, half: 4, full: 8 };
 const DAY_HOURS = 8; // 7 to 4 with lunch
 const TASK_FIELDS = "id,title,notes,bucket,priority,status,waiting_on,job,size,scheduled_date,target_date,dropdead_date,planned,promised_to,nag_hours,confirmed";
+// Trash: a removed task keeps its row with deleted_at set (the app's Put back / Undo). Every read here skips those.
 const OFF_SOURCES = ["pcg_holiday", "pto"]; // all-day rows in fm_meetings that take the whole day off
 
 /* ---------------- tools ---------------- */
@@ -78,7 +79,7 @@ const TOOLS: Anthropic.Tool[] = [
     input_schema: { type: "object", properties: { id: { type: "number" }, reason: { type: "string", description: "Why, in Adam's words (shown to him)" }, ...taskProps }, required: ["id"] },
   },
   { name: "complete_task", description: "Mark a task done.", input_schema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] } },
-  { name: "delete_task", description: "Delete a task. ONLY when Adam explicitly says delete/remove, or to remove an exact duplicate.", input_schema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] } },
+  { name: "delete_task", description: "Remove a task to the Trash (it can be put back for 30 days). ONLY when Adam explicitly says delete/remove, or to remove an exact duplicate.", input_schema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] } },
   {
     name: "ask_adam",
     description: "Stop and ask Adam 1 to 3 short multiple-choice questions you truly need answered before you can file or schedule correctly (a missing deadline, which job, whether something can slip). Do NOT ask about things you can decide with the rules. After calling this, stop; Adam's answers come back as the next message.",
@@ -123,13 +124,13 @@ async function runTool(db: DB, name: string, input: any, today: string, batch: s
   if (name === "list_tasks") {
     const win = Math.max(1, Math.min(90, Number(input?.window_days) || 21));
     const until = new Date(new Date(today + "T12:00:00Z").getTime() + win * 86400000).toISOString().slice(0, 10);
-    let q = db.from("fm_tasks").select(TASK_FIELDS).or(`scheduled_date.is.null,and(scheduled_date.gte.${today},scheduled_date.lte.${until}),dropdead_date.lt.${today},target_date.lt.${today}`).order("scheduled_date", { nullsFirst: true }).limit(200);
+    let q = db.from("fm_tasks").select(TASK_FIELDS).is("deleted_at", null).or(`scheduled_date.is.null,and(scheduled_date.gte.${today},scheduled_date.lte.${until}),dropdead_date.lt.${today},target_date.lt.${today}`).order("scheduled_date", { nullsFirst: true }).limit(200);
     if (!input?.include_done) q = q.neq("status", "done");
     const { data, error } = await q;
     return error ? "ERROR: " + error.message : (data?.length ? JSON.stringify(data) : "No open tasks.");
   }
   if (name === "day_load") {
-    const { data, error } = await db.from("fm_tasks").select("id,title,scheduled_date,size,status,bucket,confirmed").gte("scheduled_date", input.from).lte("scheduled_date", input.to).neq("status", "done");
+    const { data, error } = await db.from("fm_tasks").select("id,title,scheduled_date,size,status,bucket,confirmed").is("deleted_at", null).gte("scheduled_date", input.from).lte("scheduled_date", input.to).neq("status", "done");
     if (error) return "ERROR: " + error.message;
     const { data: mtgs } = await db.from("fm_meetings").select("day,title,start_at,end_at,all_day,attending,source").gte("day", input.from).lte("day", input.to);
     const work: Record<string, number> = {}, unconfirmed: Record<string, string[]> = {}, mtg: Record<string, number> = {}, off: Record<string, string> = {};
@@ -168,8 +169,8 @@ async function runTool(db: DB, name: string, input: any, today: string, batch: s
   }
   if (name === "update_task") {
     const id = Number(input?.id); if (!Number.isFinite(id)) return "ERROR: missing id";
-    const { data: before } = await db.from("fm_tasks").select(TASK_FIELDS).eq("id", id).maybeSingle();
-    if (!before) return "ERROR: no task with that id";
+    const { data: before } = await db.from("fm_tasks").select(TASK_FIELDS).eq("id", id).is("deleted_at", null).maybeSingle();
+    if (!before) return "ERROR: no task with that id (or it is in the Trash)";
     if (before.promised_to && input.scheduled_date && input.scheduled_date !== before.scheduled_date && !/promis|adam said|adam ok|he said/i.test(String(input.reason || ""))) {
       return `REFUSED: task ${id} is promised to ${before.promised_to}. Do not move it unless Adam explicitly said to; if he did, include 'Adam said' in the reason.`;
     }
@@ -186,8 +187,8 @@ async function runTool(db: DB, name: string, input: any, today: string, batch: s
   }
   if (name === "complete_task") {
     const id = Number(input?.id); if (!Number.isFinite(id)) return "ERROR: missing id";
-    const { data: before } = await db.from("fm_tasks").select(TASK_FIELDS).eq("id", id).maybeSingle();
-    if (!before) return "ERROR: no task with that id";
+    const { data: before } = await db.from("fm_tasks").select(TASK_FIELDS).eq("id", id).is("deleted_at", null).maybeSingle();
+    if (!before) return "ERROR: no task with that id (or it is in the Trash)";
     const { data, error } = await db.from("fm_tasks").update({ status: "done", done_at: new Date().toISOString() }).eq("id", id).select(TASK_FIELDS).single();
     if (error) return "ERROR: " + error.message;
     await logMove(db, batch, "complete", id, before, data, "");
@@ -195,14 +196,15 @@ async function runTool(db: DB, name: string, input: any, today: string, batch: s
     return "Done: " + data.title;
   }
   if (name === "delete_task") {
+    // soft delete: the row stays with deleted_at set, so the app's Trash can Put it back and Undo works
     const id = Number(input?.id); if (!Number.isFinite(id)) return "ERROR: missing id";
-    const { data: before } = await db.from("fm_tasks").select(TASK_FIELDS).eq("id", id).maybeSingle();
-    if (!before) return "ERROR: no task with that id";
-    await logMove(db, batch, "delete", null, before, null, "");
-    const { error } = await db.from("fm_tasks").delete().eq("id", id);
+    const { data: before } = await db.from("fm_tasks").select(TASK_FIELDS).eq("id", id).is("deleted_at", null).maybeSingle();
+    if (!before) return "ERROR: no task with that id (or it is already in the Trash)";
+    const { error } = await db.from("fm_tasks").update({ deleted_at: new Date().toISOString() }).eq("id", id);
     if (error) return "ERROR: " + error.message;
+    await logMove(db, batch, "delete", id, before, null, "Adam said remove/delete");
     actions.push({ kind: "delete", id, title: before.title });
-    return "Deleted: " + before.title;
+    return "Removed to the Trash: " + before.title;
   }
   return "ERROR: unknown tool";
 }
