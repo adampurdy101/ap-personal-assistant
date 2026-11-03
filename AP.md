@@ -50,6 +50,7 @@ a maroon "?" badge when size/priority are still guesses (click → 2-question po
 | nag_hours | 0 = none; else nag every N hours until done |
 | confirmed | true once the owner himself set size + priority; false = guessed (the app shows "?") |
 | deleted_at | set = in the Trash (hidden everywhere, Put back restores it); NULL = live. Rows in the Trash past 30 days are deleted for good on the next app load |
+| carried, carried_from | how many times an unfinished task was carried forward to today, and the day it was first due on |
 | source | `app` · `quick` · `tomorrow` · `brain` · `claude` · `morning` · `eod` · `imported` · `gmail` |
 
 Every change the brain, the app controls or a scheduled run makes is logged in `fm_moves`
@@ -71,6 +72,15 @@ and "why did this move" both have an answer. App batches are `app-<date>`.
   toast says why; drag/drop or Pick a day onto such a day asks first.
 - Month scroll: the month in focus (white cells, title) only changes with ‹ › and Today. Scrolling peeks; a
   "↕ viewing October" note shows by the title while scrolled away.
+
+## Click → Selected first · carry forward (v47, Nov 3 2026)
+- Clicking a chip opens the day panel with THAT task as the first card (blue "SELECTED" strip, expanded, panel
+  scrolled to the top); the rest of the day follows under "Also on this day". No hunting in the list.
+- Carry forward: on every load, every open task sitting on a day before today moves to today (work → the next
+  work day), `carried` goes up by one (↻N on the chip, "Carried ×N · was <day>" status) and `carried_from` keeps
+  the day it was first due. Logged in `fm_moves` as `carry-<date>` moves. The update is guarded on the old
+  `scheduled_date`, so two windows or the morning plan never double-count. Nothing is left behind on a past day.
+- The Mini button is gone for good (the owner removed it on purpose); `initMini` stays harmless.
 
 ## Scheduling rules (summary)
 1. Nothing goes in without bucket, priority, size and a day.

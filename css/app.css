@@ -111,6 +111,14 @@ b, strong { font-weight: 700; }
 .chip.is-done:hover { opacity: .85; }
 .chip .mv.x { right: 2px; font-size: 14px; line-height: 14px; }
 .chip.is-done:hover .mv.x { display: block; }
+/* ↻N = carried forward N times (it slipped); the status line says the day it was first due */
+.chip .carry { display: inline-block; font-size: 10px; font-weight: 800; color: var(--maroon); border: 1px solid var(--maroon); border-radius: 3px; padding: 0 3px; line-height: 12px; margin-right: 4px; vertical-align: 1px; background: #fff; }
+.chip.p-urgent .carry { color: #fff; border-color: #fff; background: transparent; }
+/* the task he clicked: first in the panel, outlined, labeled */
+.sec.pick { border: 2px solid var(--blue); box-shadow: 2px 2px 0 rgba(42,74,138,.35); }
+.sec.pick .lab { background: var(--blue); color: #fff; }
+.sec.pick .lab small { color: #e8edf7; }
+.sec.pick .item { margin-top: 2px; }
 /* "?" = size or priority were guessed; click it to set them */
 .chip .q { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 1.5px solid var(--maroon); color: var(--maroon); font-size: 10px; font-weight: 900; line-height: 11px; text-align: center; margin-right: 4px; vertical-align: -2px; cursor: pointer; }
 .chip.p-urgent .q { border-color: #fff; }
@@ -301,9 +309,9 @@ b, strong { font-weight: 700; }
 .item.p-low    { border-left-color: #777; }
 .item.planned  { border-style: dashed; box-shadow: none; }
 .item.is-done  { opacity: .6; }
-.item .head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.item .head { display: flex; align-items: center; gap: 8px; cursor: pointer; flex-wrap: wrap; row-gap: 4px; }
 .item .head .chip { display: inline-block; box-shadow: none; cursor: pointer; flex: none; }
-.item .head .title { font-weight: 600; flex: 1; min-width: 0; }
+.item .head .title { font-weight: 600; flex: 1 1 150px; min-width: 0; }   /* long pills wrap under the title instead of squeezing it */
 .item.is-done .head .title { text-decoration: line-through; }
 .item .head .status { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .item .head .caret { color: var(--ink-3); }

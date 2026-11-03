@@ -5,7 +5,8 @@
 //  speak), Add task, chip push arrows, "?" size/priority popover, Balance week.
 //  Done stays on its day (faded, ✓) · Remove = Trash (30 days, Put back) · Undo on
 //  every change (toast button, Status card, Ctrl+Z). Nothing is hard-deleted except
-//  "Delete for good" inside the Trash.
+//  "Delete for good" inside the Trash. Unfinished items are carried forward to today
+//  on every open (↻N on the chip). Click a chip → that task opens FIRST in the panel.
 //  Data: Supabase fm_tasks / fm_jobs / fm_meetings / fm_moves.
 // ============================================================
 import { db } from "./supabase.js";
@@ -102,7 +103,34 @@ async function loadAll() {
     state.meetingsSync = state.meetings.reduce((a, x) => (x.updated_at > a ? x.updated_at : a), "") || null;
   }
   purgeOldTrash();
+  await carryForward();
   render();
+}
+
+// ---------- carry forward: nothing unfinished stays behind on a past day ----------
+// Every open task sitting on a day before today moves to today (work → the next work day),
+// counts one more slip (↻N on the chip) and remembers the day it was first due on. The
+// morning plan does the same at 5:30; this makes sure it happens the moment the app opens.
+async function carryForward() {
+  const today = todayISO();
+  const late = state.tasks.filter((t) => !isDone(t) && t.scheduled_date && t.scheduled_date < today);
+  if (!late.length) return;
+  const moved = [];
+  for (const t of late) {
+    const to = t.bucket === "work" ? landDay(today, "work") : today;
+    const from = t.scheduled_date;
+    const patch = { scheduled_date: to, planned: false, carried: (t.carried || 0) + 1, carried_from: t.carried_from || from };
+    // only if nobody else (another window, the morning plan) moved it first
+    const { data, error } = await db.from("fm_tasks").update(patch).eq("id", t.id).eq("scheduled_date", from).select("id");
+    if (error || !data || !data.length) continue;
+    const before = { scheduled_date: from, planned: t.planned, carried: t.carried || 0, carried_from: t.carried_from || null };
+    Object.assign(t, patch);
+    db.from("fm_moves").insert({ batch_id: "carry-" + today, kind: "move", task_id: t.id, before, after: patch, reason: `Carried forward — not finished on ${fmtShort(from)}`, from_date: from, to_date: to }).then(() => {}, () => {});
+    moved.push(t);
+  }
+  if (!moved.length) return;
+  const days = [...new Set(moved.map((t) => fmtShort(t.carried_from)))].slice(0, 3).join(", ");
+  toast(`Carried ${moved.length} unfinished item${moved.length === 1 ? "" : "s"} forward to today (from ${days})`, { ms: 7000 });
 }
 
 // once per session: anything that has sat in the Trash past TRASH_DAYS goes for good
@@ -360,12 +388,14 @@ function statusLine(t) {
   if (t.dropdead_date && t.dropdead_date < today) return { text: `Overdue ${daysBetween(t.dropdead_date, today)}d`, cls: "overdue" };
   if (t.status === "waiting") return { text: `Waiting on ${t.waiting_on || "…"}`, cls: "warn" };
   if (t.target_date && t.target_date < today) return { text: "Target missed", cls: "warn" };
+  if (t.carried > 0) return { text: `Carried ×${t.carried} · was ${fmtShort(t.carried_from || t.scheduled_date).replace(",", "")}`, cls: "warn" };
   if (t.planned) return { text: "Planned", cls: "" };
   return { text: STATUS[t.status] || "Not started", cls: "" };
 }
 
 function tooltip(t) {
   const parts = [`${PRI[t.priority].label}`, isDone(t) ? "Done " + whenShort(t.done_at) : STATUS[t.status]];
+  if (t.carried > 0 && !isDone(t)) parts.push(`carried forward ${t.carried}×`);
   if (t.job) parts.push(t.job);
   if (t.target_date) parts.push("Target " + fmtShort(t.target_date));
   if (t.dropdead_date) parts.push("Drop-dead " + fmtShort(t.dropdead_date));
@@ -412,6 +442,7 @@ function chipFor(t) {
   const done = isDone(t);
   const c = el("span", `chip p-${t.priority}` + (t.planned ? " planned" : "") + (t.bucket === "home" && state.bucket === "both" ? " bucket-home" : "") + (done ? " is-done" : ""));
   c.append(el("span", "sym", done ? "✓" : PRI[t.priority].mark));
+  if (t.carried > 0 && !done) { const k = el("span", "carry", `↻${t.carried}`); k.title = `Carried forward ${t.carried}× — first due ${fmtShort(t.carried_from || t.scheduled_date)}`; c.append(k); }
   if (!t.confirmed && !done) {
     const q = el("span", "q", "?");
     q.title = "I guessed the size and priority — click to set them";
@@ -989,6 +1020,7 @@ function renderSkinny(r) {
     if (nx.dropdead_date) bits.push(nx.dropdead_date === today ? "drop-dead today" : "drop-dead " + fmtShort(nx.dropdead_date));
     else if (nx.target_date) bits.push("target " + fmtShort(nx.target_date));
     if (nx.promised_to) bits.push("promised to " + nx.promised_to);
+    if (nx.carried > 0) bits.push(`carried ${nx.carried}×`);
     if (nx.status === "working") bits.push("working");
     txt.append(el("small", "", bits.join(" · ")));
     row.append(txt);
@@ -1229,6 +1261,7 @@ function phoneChip(t) {
   else {
     if (t.dropdead_date) bits.push(t.dropdead_date === todayISO() ? "drop-dead today" : "drop-dead " + fmtShort(t.dropdead_date).replace(",", ""));
     if (t.promised_to) bits.push("promised to " + t.promised_to);
+    if (t.carried > 0) bits.push(`carried ${t.carried}×`);
     if (t.status === "working") bits.push("working");
     if (t.status === "waiting") bits.push("waiting on " + (t.waiting_on || "someone"));
     bits.push((SIZE[t.size] || "1 hr") + (t.confirmed ? "" : " ?"));
@@ -1397,6 +1430,13 @@ function renderDayPanel(r) {
   const d = state.selected;
   const items = tasksOn(d);
   panelHeader(r, fmtLong(d), `${items.length} item${items.length === 1 ? "" : "s"}`);
+  // The one he clicked comes FIRST — expanded, outlined, at the top of the panel. No hunting.
+  const picked = state.openId != null ? items.find((t) => t.id === state.openId) : null;
+  if (picked) {
+    const sP = card(r, "Selected", { sub: "what you clicked — work in it right here", cls: "pick" });
+    sP.append(itemCard(picked));
+    if (state.panelJump) { state.panelJump = false; requestAnimationFrame(() => { const p = $("rail"); if (p) p.scrollTop = 0; }); }
+  }
   if (showMeetings() && !isWeekend(d)) {
     const sH = card(r, "Hours"); sH.append(loadLine(d));
     const ms = meetingsOn(d);
@@ -1407,10 +1447,13 @@ function renderDayPanel(r) {
       sM.append(box);
     }
   }
-  const nDone = items.filter(isDone).length;
-  const sT = card(r, "Tasks", { sub: nDone ? `${items.length - nDone} open · ${nDone} done — click one for detail` : "click one for detail" });
-  if (!items.length) sT.append(el("div", "empty", "Nothing here yet. Quick add puts new things on this day."));
-  items.forEach((t) => sT.append(itemCard(t)));
+  const rest = picked ? items.filter((t) => t.id !== picked.id) : items;
+  const nDone = rest.filter(isDone).length;
+  if (!picked || rest.length) {
+    const sT = card(r, picked ? "Also on this day" : "Tasks", { sub: nDone ? `${rest.length - nDone} open · ${nDone} done — click one for detail` : "click one for detail" });
+    if (!items.length) sT.append(el("div", "empty", "Nothing here yet. Quick add puts new things on this day."));
+    rest.forEach((t) => sT.append(itemCard(t)));
+  }
   // coming up (next 5 days)
   const soon = [];
   for (let i = 1; i <= 5; i++) { const dd = iso(addDays(fromISO(d), i)); openOn(dd).forEach((t) => soon.push(t)); }
@@ -1664,7 +1707,8 @@ function editForm(t) {
 function openDay(dateISO, taskId = null) {
   if (!dateISO) return openUnscheduled(taskId);
   state.selected = dateISO; state.panel = "day"; state.openId = taskId; state.editId = null;
-  render();
+  state.panelJump = taskId != null;   // a clicked task goes to the top of the panel, scrolled into view
+  render({ now: true });
 }
 function openUnscheduled(taskId = null) { state.panel = "unscheduled"; state.openId = taskId; state.editId = null; render(); }
 function openAdd() { state.panel = "add"; state.openId = null; state.editId = null; render({ now: true }); }
