@@ -2,8 +2,9 @@
 
 A personal organizer that runs itself. One month calendar always on screen, two calendars
 (Work / Home) you can toggle or overlay, priority shown by shape and color, a side panel with
-the next thing to do, quick add by typing or speaking, an end-of-day "Tomorrow" pencil-in, and
-a Claude brain that files and reshuffles within the rules.
+the next thing to do, quick add by typing or speaking, an end-of-day "Tomorrow" pencil-in, a
+`$ Bills` view that keeps the bills paid (hover for the summary, Paid ✓ in one click, a private
+calendar feed), and a Claude brain that files and reshuffles within the rules.
 
 Vanilla HTML/CSS/JS PWA on GitHub Pages. Data in Supabase (Row Level Security, owner only).
 No build step. Push to `main` and it deploys.
@@ -14,8 +15,9 @@ No build step. Push to `main` and it deploys.
 ## Files
 - `index.html` — shell
 - `css/app.css` — the look (light paper, charcoal hairlines, tan + olive fills)
-- `js/app.js` — panel, calendar, quick add, Tomorrow, chip controls, popover
+- `js/app.js` — panel, calendar, quick add, Tomorrow, chip controls, popover, the Bills UI
+- `js/bills.js` — the bill ledger (occurrences, status, tally, every change logged)
 - `js/auth.js` — owner-only email login
 - `js/config.js` — public Supabase URL + publishable key (safe by design)
 - `sw.js`, `manifest.webmanifest` — installable app
-- `supabase/functions/ap-brain`, `supabase/functions/ap-meetings` — edge functions
+- `supabase/functions/ap-brain`, `supabase/functions/ap-meetings`, `supabase/functions/bills-ics` — edge functions

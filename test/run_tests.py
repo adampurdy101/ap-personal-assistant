@@ -15,6 +15,10 @@ REPO = HERE.parent
 SITE = HERE / "site"
 SHOTS = HERE / "shots"
 PORT = 4173
+# The checks below are written against the seed as of this morning. The browser clock is pinned to it
+# (Playwright's clock API) so the harness keeps passing on any later day; re-dump the seed and move
+# this date together when the rows change.
+FIXED_NOW = "2026-11-03T09:00:00-08:00"
 # seed.json = {"tasks": [...fm_tasks rows...], "jobs": [...fm_jobs rows...], "meetings": [...fm_meetings rows...]}
 # for the owner, dumped from Supabase (titles and dates only — it is gitignored, never commit it). One query:
 #   select json_build_object('tasks', (select json_agg(t) from fm_tasks t), 'jobs', (select json_agg(j) from fm_jobs j
@@ -22,6 +26,17 @@ PORT = 4173
 if not (HERE / "seed.json").exists():
     sys.exit("test/seed.json is missing — dump it first (see the comment at the top of this file)")
 SEED = json.loads((HERE / "seed.json").read_text())
+# The live dump moves on every day (items get done, carried, moved). The rows the checks click on are
+# pinned back to the FIXED_NOW world here, so a fresh dump never breaks a check that is about the app.
+PINS = {
+    8:  {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-03", "bucket": "home", "deleted_at": None},   # T3: on today, gets done + undone
+    32: {"status": "not_started", "done_at": None, "scheduled_date": "2026-10-30", "bucket": "home", "carried": 0, "carried_from": None, "deleted_at": None},   # T7b: slipped, carried forward on load
+    36: {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-05", "bucket": "home", "deleted_at": None},   # T11: dragged onto today
+    3:  {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-06", "bucket": "work", "deleted_at": None},   # T5: removed, restored
+    33: {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-07", "bucket": "home", "deleted_at": None},   # T12: a Home chip
+}
+for _row in SEED["tasks"]:
+    if _row["id"] in PINS: _row.update(PINS[_row["id"]])
 
 def build_site():
     if SITE.exists(): shutil.rmtree(SITE)
@@ -56,9 +71,11 @@ def main():
                 ctx.add_init_script("window.__SEED = " + json.dumps(seed or SEED) + "; try { localStorage.setItem('fm.bucket', 'both'); } catch (e) {}")
                 ctx.route("**/fonts.googleapis.com/**", lambda r: r.abort())
                 ctx.route("**/fonts.gstatic.com/**", lambda r: r.abort())
+                ctx.route("**/s2/favicons**", lambda r: r.abort())   # bill logos — offline here, the initials fallback shows
                 ctx.route("**/functions/v1/ap-brain", lambda r: r.fulfill(status=200, content_type="application/json",
                     body=json.dumps({"reply": "Week is balanced. Moved nothing.", "actions": [], "batch_id": "fake-batch-1"})))
                 page = ctx.new_page()
+                page.clock.install(time=FIXED_NOW)   # Date starts at FIXED_NOW and runs from there
                 errors = []
                 page.on("pageerror", lambda e: errors.append(str(e)))
                 page.on("console", lambda m: errors.append("console.error: " + m.text) if m.type == "error" and "ERR_FAILED" not in m.text else None)
@@ -380,6 +397,70 @@ def main():
             page.click("#tabs button[data-tab='month']"); page.wait_for_timeout(700)
             t.ok(page.locator(".pm-cell.today").count() == 1, "phone month renders")
             t.eq(errors, [], f"no page errors in phone: {errors}")
+            page.context.close()
+
+            # ---------- T14 bills: badge, hover summary, Paid ✓ + Undo, the Bills view, add a bill ----------
+            t.name = "bills"
+            page, errors = new_page()
+            def bills(page): return page.evaluate("({bills: window.__FAKE.tables.fm_bills, pays: window.__FAKE.tables.fm_bill_payments, moves: window.__FAKE.tables.fm_moves})")
+            badge = page.locator('#bucket-seg button[data-bucket="bills"] .bbadge')
+            t.ok(badge.is_visible() and "LATE" in badge.inner_text(), "LATE badge on the $ Bills button (seed has unpaid October bills)")
+            t.ok(page.locator("#rail-body .row.link", has_text="bills past due").count() == 1, "Status card carries the past-due line on the everyday calendar")
+            page.hover('#bucket-seg button[data-bucket="bills"]'); page.wait_for_timeout(500)
+            t.eq(page.locator(".pop.billpeek").count(), 1, "hovering $ Bills shows the summary")
+            t.ok(page.locator(".pop.billpeek .pr").count() >= 1, "summary lists bills with Paid ✓")
+            shot(page, "11-bills-peek")
+            first = page.locator(".pop.billpeek .pr").first
+            n0 = len(bills(page)["pays"])
+            first.locator("button.pay").click(); page.wait_for_timeout(600)
+            d = bills(page); t.eq(len(d["pays"]), n0 + 1, "Paid ✓ in the summary adds one fm_bill_payments row")
+            t.ok(any(m["kind"] == "bill_paid" for m in d["moves"]), "the payment is logged in fm_moves (bill_paid)")
+            t.ok("Paid" in toast_text(page) and "Undo" in toast_text(page), "toast says Paid ✓ and offers Undo")
+            page.locator("#toast button.undo").click(); page.wait_for_timeout(700)
+            t.eq(len(bills(page)["pays"]), n0, "Undo takes the payment row back out")
+            page.mouse.move(10, 700); page.wait_for_timeout(400)
+            t.eq(page.locator(".pop.billpeek").count(), 0, "summary closes when the mouse leaves")
+            page.click('#bucket-seg button[data-bucket="bills"]'); page.wait_for_timeout(900)
+            t.eq(page.locator(".cal-head.bills").count(), 1, "$ Bills switches the calendar to bills only")
+            t.eq(page.locator(".mscroll .chip").count(), 0, "no task chips in bills mode")
+            t.ok(page.locator(".mscroll .bchip").count() >= 10, "bill chips on the month grid")
+            t.ok(page.locator(".mscroll .bchip.st-late").count() >= 1, "unpaid past bills are marked LATE")
+            t.eq(page.locator("#rail-body .sec.bq-card").count(), 1, "tally card first in the panel")
+            t.eq(page.locator("#rail-body .sec.late").count(), 1, "past-due card in the panel")
+            t.eq(page.locator("#balance-btn").is_visible(), False, "Balance week hidden in bills mode")
+            shot(page, "12-bills-month")
+            chip = page.locator(".mscroll .day:not(.other) .bchip.st-late").first
+            bid, due = chip.get_attribute("data-bill"), chip.get_attribute("data-due")
+            chip.click(); page.wait_for_timeout(700)
+            t.eq(page.locator("#rail-body .sec.pick .item.bill").count(), 1, "clicked bill opens first in the panel (Selected card)")
+            shot(page, "13-bills-day")
+            page.locator("#rail-body .sec.pick button", has_text="Paid").first.click(); page.wait_for_timeout(800)
+            d = bills(page)
+            t.ok(any(p["bill_id"] == int(bid) and p["due_date"] == due for p in d["pays"]), "Paid ✓ in the panel saves bill_id + due_date")
+            t.eq(page.locator(f".mscroll .bchip.st-paid[data-bill='{bid}'][data-due='{due}']").count(), 1, "that chip now shows ✓ paid")
+            page.locator("#rail-body button", has_text="+ Add bill").first.click(); page.wait_for_timeout(600)
+            page.fill("#rail-body input[name='bname']", "Test Water"); page.fill("#rail-body input[name='amount']", "45.5")
+            page.fill("#rail-body input[name='anchor_date']", "2026-11-20")
+            shot(page, "14-bills-add")
+            page.get_by_role("button", name="Add bill", exact=True).click(); page.wait_for_timeout(900)
+            d = bills(page); nb = [b for b in d["bills"] if b["name"] == "Test Water"]
+            t.ok(len(nb) == 1 and float(nb[0]["amount"]) == 45.5 and nb[0]["anchor_date"] == "2026-11-20" and nb[0]["recur"] == "monthly", f"new bill saved monthly from Nov 20: {nb}")
+            t.ok(any(m["kind"] == "bill_add" for m in d["moves"]), "the add is logged in fm_moves (bill_add)")
+            t.eq(page.locator(".mscroll .bchip[data-due='2026-11-20']", has_text="Test Water").count(), 1, "new bill shows on Nov 20")
+            page.click('#bucket-seg button[data-bucket="both"]'); page.wait_for_timeout(800)
+            t.eq(page.locator(".mscroll .bchip").count(), 0, "everyday calendar stays bill-free")
+            t.ok(page.locator(".mscroll .chip").count() >= 1, "task chips are back")
+            t.eq(errors, [], f"no page errors in bills: {errors}")
+            page.context.close()
+
+            # ---------- T15 phone bills tab ----------
+            t.name = "phone-bills"
+            page, errors = new_page(viewport=(402, 874), mobile=True)
+            page.click("#tabs button[data-tab='bills']"); page.wait_for_timeout(800)
+            t.eq(page.locator("#rail-body .sec.bq-card").count(), 1, "phone Bills tab shows the tally")
+            t.ok(page.locator("#rail-body .brow").count() >= 1, "phone lists the bills")
+            shot(page, "15-phone-bills")
+            t.eq(errors, [], f"no page errors in phone bills: {errors}")
             page.context.close()
 
             browser.close()

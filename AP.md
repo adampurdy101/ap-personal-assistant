@@ -11,12 +11,13 @@ in the Supabase table `fm_rules`, not here. (The `fm_` table prefix is historica
 ## Pieces
 | Piece | Does | Lives |
 |---|---|---|
-| App | Panel left (Quick look · Next up · Status · Today · Meetings · Promises · Tasks), calendar right (Month/Week/Day · Work/Home/Both), Quick add, Tell Assistant, Add task, Balance week, Done log, Trash, Undo, Mini | `index.html`, `css/app.css`, `js/app.js` → GitHub Pages |
+| App | Panel left (Quick look · Next up · Status · Today · Meetings · Promises · Tasks), calendar right (Month/Week/Day · Work/Home/Both/$ Bills), Quick add, Tell Assistant, Add task, Balance week, Done log, Trash, Undo | `index.html`, `css/app.css`, `js/app.js`, `js/bills.js` → GitHub Pages |
+| Bills | The bill ledger: `$ Bills` view, hover summary, Paid ✓, add/edit, accounts, alerts; a private iCalendar feed for Apple/Google Calendar | `js/bills.js` (data), `js/app.js` (UI), edge function `bills-ics` |
 | Brain | Instant filing and reshuffle from the mic / Tell Assistant / Balance week | Supabase edge function `ap-brain` (`supabase/functions/ap-brain`) |
 | Scheduled runs | "AP · morning plan" 5:30 a.m., "AP · end of day" 2:30 p.m., Mon–Fri | Claude scheduled tasks (read `fm_rules` for the rulebook) |
 | Meetings | Reads the owner's published work calendar (ICS) every 15 min; writes titles + times only | Supabase edge function `ap-meetings` + pg_cron job `ap-meetings-sync` |
 | Days off | Company holidays and PTO as all-day rows (`source` = `pcg_holiday` / `pto`) | `fm_meetings`; the sync never touches rows from other sources |
-| Data | Tasks, jobs, moves, brain log, rules, meetings | Supabase tables `fm_tasks`, `fm_jobs`, `fm_moves`, `fm_brain_log`, `fm_rules`, `fm_meetings`, `fm_meeting_rules` (RLS, owner only); `fm_settings` (service role only: calendar link, cron key) |
+| Data | Tasks, jobs, moves, brain log, rules, meetings, bills | Supabase tables `fm_tasks`, `fm_jobs`, `fm_moves`, `fm_brain_log`, `fm_rules`, `fm_meetings`, `fm_meeting_rules`, `fm_bills`, `fm_bill_payments`, `fm_accounts`, `fm_prefs` (RLS, owner only); `fm_settings` (service role only: calendar link, cron key) |
 
 The Supabase URL and publishable key in `js/config.js` are public by design; Row Level
 Security plus the owner-only login protect the data. No secrets live in this repo.
@@ -32,6 +33,44 @@ every future workday (hours booked of 8, red when over) · `DD` corner tag on dr
 past days olive + dashed + faint red X + DONE · days off hatched with an OFF label · 7 px charcoal
 bar where a month starts. Chips: hover shows ‹ › push-a-day arrows; drag and drop between days;
 a maroon "?" badge when size/priority are still guesses (click → 2-question popover).
+
+## Bills (v49, Nov 6 2026)
+The old stand-alone bill calendar (repo `adampurdy101.github.io`, one JSON blob in `billdata`) was folded into AP so
+there is one calendar. Its rows were migrated into real tables; occurrences are computed, never stored.
+
+Tables (RLS owner-only, in the `supabase_realtime` publication, `updated_at` touch triggers):
+- `fm_bills` — one row per bill: `name`, `domain` (logo = Google favicon of the domain, initials as the fallback),
+  `amount`, `recur` (`monthly` · `biweekly` · `yearly` · `once`), `anchor_date` (a date it falls on: monthly = that day
+  every month, clamped on short months; biweekly = every 14 days from it; yearly = that month + day), `account_id`,
+  `remind_days` (default 2), `autopay`, `notes`, `photo` (data URL), `ended_on` (last due date — paid-off loan,
+  cancelled service), `deleted_at` (Trash, like tasks), `legacy_id` (the old app's id).
+- `fm_bill_payments` — one row per PAID occurrence: `bill_id` + `due_date` (unique), `paid_at`, `amount`, `source`
+  (`app` · `claude` · `migrated`), `note`. No row = not paid. **A bill is paid only on the owner's word**
+  (Paid ✓ in the app, or "I paid X" to the brain / a scheduled run) — autopay never marks anything paid.
+- `fm_accounts` — what a bill pays from: `bank`, `nick`, `last4`, `sort`.
+- `fm_prefs` — `(user_id, key) → value jsonb`; key `bills_feed_token` holds the private feed token (kept from the old app so the
+  existing Apple Calendar subscription keeps working).
+
+Status of an occurrence (`js/bills.js` `statusOf`): `paid` · `late` (due before today, unpaid) · `today` · `soon` (inside
+`remind_days`) · `open`. Past due looks back 75 days. Every state is shape + wording, never color alone
+(dashed red + LATE tag, red + DUE tag, faded + ✓).
+
+In the app: the `$ Bills` button in the bucket segment carries a red `N LATE` badge; hovering it shows the summary
+(month tally, past due, due in 7 days, Paid ✓ on each line); clicking it turns the calendar to bills only (bill chips with
+the day's $ total, PAID / N LATE stamps on past days) with the panel showing the month tally (left to pay, bar, past due /
+due in 7 days / needed now), !! Past due, Due in the next 7 days, Later this month, Paid this month, Accounts, and the
+buttons + Add bill / Accounts / Phone alerts. Clicking a chip opens that day with the bill first (Selected card: Paid ✓ ·
+Edit · Add photo · Remove bill). The everyday calendar stays bill-free on purpose: the Status card carries
+`!! N bills past due` (every view) or `$ Bills: $X left this month · next …`, and desktop alerts fire `remind_days`
+before each due date and daily while anything is past due. Phone: a Bills tab in the bottom bar.
+
+Every change is logged in `fm_moves` with `task_id` null and kind `bill_paid` · `bill_unpaid` · `bill_add` · `bill_update` ·
+`bill_remove` · `bill_restore`, so Undo and "why did this change" work the same as for tasks.
+
+Feed: edge function `bills-ics` (`verify_jwt` off — the token in the URL is the credential; it reads with the service
+role, scoped to the user whose `fm_prefs` row holds that token). One all-day event per due date for the previous month
+through 12 months out, an alarm `remind_days` before at 9 AM, paid ones marked ✓ with no alarm. The app's "Phone alerts"
+panel shows the `webcal://` link; it never appears in this repo.
 
 ## Data model (fm_tasks)
 | field | meaning |
@@ -104,7 +143,9 @@ and "why did this move" both have an answer. App batches are `app-<date>`.
 ## Brain tools
 `list_jobs`, `list_tasks`, `day_load` (tasks + attended meetings per day, OFF days, guessed items),
 `add_task`, `update_task` (moves need a reason; refuses promised items and past-drop-dead),
-`complete_task`, `delete_task` (soft: sets `deleted_at`), `ask_adam` (max 3 A/B/C questions, then stop). Every read skips `deleted_at` rows. Model from the
+`complete_task`, `delete_task` (soft: sets `deleted_at`), `ask_adam` (max 3 A/B/C questions, then stop),
+and for bills `list_bills` (past due first), `mark_bill_paid`, `unmark_bill_paid`, `add_bill`, `update_bill` — a bill is
+never a task, and the brain marks one paid only when the owner says so. Every read skips `deleted_at` rows. Model from the
 `AP_MODEL` secret (default `claude-sonnet-4-5`). Anthropic key in Supabase Edge Function secrets only.
 
 ## Quick-add grammar
@@ -117,12 +158,14 @@ Bump `?v=N` on `css/app.css` and `js/app.js` in `index.html` and `VERSION` in `s
 Check before push: `test/run_tests.py` copies the site, swaps `js/supabase.js` for the in-memory double
 (`test/fake-supabase.js`), seeds it from `test/seed.json` (your own rows: titles and dates only — keep it
 out of the repo, it is gitignored), drives headless Chrome through the real flows (done / remove / trash /
-undo / quick add / add panel / moves across weekends and PTO / drag / views / phone) and drops screenshots in
-`test/shots/`. Needs `pip install playwright` and a Chrome binary.
+undo / quick add / add panel / moves across weekends and PTO / drag / views / phone / bills: badge, hover summary,
+Paid ✓ + Undo, the Bills view, add a bill, phone Bills tab) and drops screenshots in `test/shots/`. The browser clock is
+pinned to `FIXED_NOW` (Playwright's clock API) and the few task rows the checks click on are pinned in `PINS`, so a
+fresh dump of the seed on any later day keeps the checks green. Needs `pip install playwright` and a Chrome binary.
 
 ## Stages
 1. Calendar, panel, quick add + mic, Add task, brain, undo — done
 2. Scheduled runs (morning, end of day) — done
 3. Meetings on the calendar (Outlook feed direct, every 15 min) — done · days off — done
-4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge
+4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint + PTO stripe color options
 5. Phone-first polish

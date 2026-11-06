@@ -7,9 +7,12 @@
 //  every change (toast button, Status card, Ctrl+Z). Nothing is hard-deleted except
 //  "Delete for good" inside the Trash. Unfinished items are carried forward to today
 //  on every open (↻N on the chip). Click a chip → that task opens FIRST in the panel.
-//  Data: Supabase fm_tasks / fm_jobs / fm_meetings / fm_moves.
+//  Bills ($ Bills button): bill chips on the month grid, a hover summary, Paid ✓ in one
+//  click, add/edit bills and accounts, alerts before due dates — data layer in bills.js.
+//  Data: Supabase fm_tasks / fm_jobs / fm_meetings / fm_moves / fm_bills / fm_bill_payments / fm_accounts.
 // ============================================================
 import { db } from "./supabase.js";
+import { B, loadBills, occOn, statusOf, paymentFor, monthStats, pastDue, dueWithin, nextDue, amountOf, markPaid, unmarkPaid, saveBill, removeBill, restoreBill, saveAccount, deleteAccount, acctLabel, money, logoUrl, initials, cleanDomain, daysLate } from "./bills.js";
 import { CONFIG } from "./config.js";
 import { initAuth } from "./auth.js";
 
@@ -65,6 +68,11 @@ const state = {
   tab: "week",                                           // phone: week · month · add · brain
   pWeek: null,                                           // phone week screen: Sunday ISO of the week shown
   pMonth: null,                                          // phone month screen: first-of-month ISO
+  billOpen: null,                                        // bill id opened first in the day panel (bills mode)
+  billDraft: null,                                       // Add / Edit bill form, kept across redraws
+  billEditId: null,                                      // bill being edited (null = new)
+  acctDraft: null,                                       // Accounts panel form
+  feedToken: null,                                       // Apple Calendar feed token (fm_prefs), loaded on demand
 };
 // ---------- phone: one screen at a time, bottom tabs ----------
 const PHONE_MQ = window.matchMedia("(max-width: 740px), ((pointer: coarse) and (max-height: 520px))");
@@ -88,12 +96,14 @@ function toast(msg, { undo: withUndo = false, ms = null } = {}) {
 const TRASH_DAYS = 30;   // removed items wait this long in the Trash, then go for good
 async function loadAll() {
   const from = iso(addDays(new Date(), -45)), to = iso(addDays(new Date(), 120));
-  const [t, j, m] = await Promise.all([
+  const [t, j, m, billsOk] = await Promise.all([
     db.from("fm_tasks").select("*").order("sort").order("created_at"),
     db.from("fm_jobs").select("*").eq("active", true).order("bucket").order("sort"),
     db.from("fm_meetings").select("id,title,start_at,end_at,all_day,attending,day,updated_at,source").gte("day", from).lte("day", to).order("start_at"),
+    loadBills(db),
   ]);
   if (t.error) { toast("Load failed: " + t.error.message); return; }
+  if (!billsOk && !loadAll._billWarned) { loadAll._billWarned = true; toast("Bills didn't load: " + (B.error || "unknown")); }
   const rows = t.data || [];
   state.tasks = rows.filter((x) => !x.deleted_at);
   state.trash = rows.filter((x) => !!x.deleted_at).sort((a, b) => String(b.deleted_at).localeCompare(String(a.deleted_at)));
@@ -232,6 +242,9 @@ function subscribe() {
   liveChannel = db.channel("fm_tasks_live_" + Date.now())
     .on("postgres_changes", { event: "*", schema: "public", table: "fm_tasks" }, () => refresh())
     .on("postgres_changes", { event: "*", schema: "public", table: "fm_meetings" }, () => { clearTimeout(subscribe._m); subscribe._m = setTimeout(refresh, 1500); })
+    .on("postgres_changes", { event: "*", schema: "public", table: "fm_bill_payments" }, () => refresh())
+    .on("postgres_changes", { event: "*", schema: "public", table: "fm_bills" }, () => refresh())
+    .on("postgres_changes", { event: "*", schema: "public", table: "fm_accounts" }, () => refresh())
     .subscribe((status) => {
       if (status === "SUBSCRIBED") refresh();
       if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") setTimeout(subscribe, 3000);
@@ -246,7 +259,9 @@ setInterval(() => { if (!document.hidden && (Date.now() - lastRefresh) > 25000) 
 setInterval(() => { if (refreshQueued && !userIsTyping()) refresh(); }, 2000);
 
 // ---------- derived ----------
-const inBucket = (t) => state.bucket === "both" || t.bucket === state.bucket;
+// $ Bills mode: the calendar and panel show bills only (desktop: the 4th button; phone: the Bills tab)
+const billsMode = () => state.bucket === "bills" || (isPhone() && state.tab === "bills");
+const inBucket = (t) => !billsMode() && (state.bucket === "both" || t.bucket === state.bucket);
 // done items stay visible on their day (faded, ✓) — the Trash is the only thing that hides a task
 const visible = (t) => inBucket(t);
 const isDone = (t) => t.status === "done";
@@ -264,7 +279,7 @@ const trashItems = () => state.trash.filter(inBucket);
 const SIZE_HRS = { "15m": 0.25, "1h": 1, half: 4, full: 8 };
 const DAY_HRS = 8;
 const OFF_SOURCES = new Set(["pcg_holiday", "pto"]);   // all-day rows that take the whole day off
-const showMeetings = () => state.bucket !== "home";
+const showMeetings = () => state.bucket !== "home" && !billsMode();
 const meetingsOn = (dISO) => showMeetings() ? state.meetings.filter((m) => m.day === dISO) : [];
 const timedOn = (dISO) => meetingsOn(dISO).filter((m) => !m.all_day);
 const allDayOn = (dISO) => meetingsOn(dISO).filter((m) => m.all_day);
@@ -425,6 +440,8 @@ function render(opts) {
 function renderTop() {
   document.querySelectorAll("#bucket-seg button").forEach((b) => b.classList.toggle("on", b.dataset.bucket === state.bucket));
   document.querySelectorAll("#view-seg button").forEach((b) => b.classList.toggle("on", b.dataset.view === state.view));
+  const badge = document.querySelector('#bucket-seg button[data-bucket="bills"] .bbadge');
+  if (badge) { const n = B.loaded ? pastDue(todayISO()).length : 0; badge.textContent = n ? `${n} LATE` : ""; badge.classList.toggle("hidden", !n); }
   const btn = $("tell-btn"), inp = $("quick-input");
   if (btn) { btn.classList.toggle("listening", voice.on); const l = btn.querySelector("span"); if (l) l.textContent = voice.on ? "Listening… press to send" : "Assistant"; }
   if (inp) inp.placeholder = voice.on ? "Listening… say it at your pace" : "Quick add (Enter) — or type anything and press Assistant";
@@ -433,6 +450,7 @@ function renderTop() {
 function renderCalendar() {
   const body = $("cal-body");
   body.innerHTML = "";
+  document.querySelector(".cal-head")?.classList.toggle("bills", billsMode());
   if (state.view === "month") renderMonth(body);
   else if (state.view === "week") renderWeek(body);
   else renderDay(body);
@@ -566,6 +584,7 @@ function openQuickFix(t, anchor) {
 }
 
 function dayCell(d, { other = false, max = 4, fit = 0 } = {}) {
+  if (billsMode()) return billDayCell(d, { other, max, fit });
   const dISO = iso(d);
   const cell = el("div", "day");
   if (other) cell.classList.add("other");
@@ -797,6 +816,13 @@ function renderDay(body) {
   const dISO = iso(state.cursor);
   $("cal-title").textContent = fmtLong(dISO);
   const wrap = el("div", "dayview");
+  if (billsMode()) {
+    const occ = occOn(dISO);
+    if (!occ.length) wrap.append(el("div", "empty", "No bills due this day."));
+    occ.forEach((o) => wrap.append(billCard(o)));
+    body.append(wrap);
+    return;
+  }
   const items = tasksOn(dISO);
   if (showMeetings()) { wrap.append(loadLine(dISO)); meetingsSection(wrap, dISO); if (meetingsOn(dISO).length) wrap.append(el("h3", "", "Tasks")); }
   if (!items.length) wrap.append(el("div", "empty", "Nothing on this day. Drag something here or use Quick add."));
@@ -808,6 +834,15 @@ function renderDay(body) {
 function renderRail() {
   const r = $("rail-body");
   r.innerHTML = "";
+  if (state.panel === "addbill") return renderAddBillPanel(r);
+  if (state.panel === "accounts") return renderAccountsPanel(r);
+  if (state.panel === "billalerts") return renderBillAlertsPanel(r);
+  if (billsMode()) {
+    if (state.panel === "day" && state.selected) return renderBillDayPanel(r);
+    if (state.panel === "brain") return renderBrainPanel(r);
+    if (state.panel === "add") return renderAddPanel(r);
+    return renderBillsPanel(r);
+  }
   if (!state.panel) renderQuickLook(r);   // first thing in the general view only
   if (state.panel === "day" && state.selected) return renderDayPanel(r);
   if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
@@ -887,6 +922,10 @@ async function undoLastBatch() {
       await db.from("fm_tasks").update(b).eq("id", m.task_id);
     } else if (m.kind === "delete" && m.task_id) await db.from("fm_tasks").update({ deleted_at: null }).eq("id", m.task_id);   // back from the Trash
     else if (m.kind === "delete" && m.before) { const b = { ...m.before }; delete b.id; await db.from("fm_tasks").insert(b); }   // older hard deletes
+    else if (m.kind === "bill_paid" && m.after?.id) await db.from("fm_bill_payments").delete().eq("id", m.after.id);
+    else if (m.kind === "bill_unpaid" && m.before?.bill_id) await db.from("fm_bill_payments").insert({ bill_id: m.before.bill_id, due_date: m.before.due_date, source: m.before.source || "brain", note: m.before.note || null });
+    else if (m.kind === "bill_add" && m.after?.id) await db.from("fm_bills").update({ deleted_at: stamp }).eq("id", m.after.id);
+    else if (m.kind === "bill_update" && m.before?.id) { const b = { ...m.before }; delete b.id; delete b.name; await db.from("fm_bills").update(b).eq("id", m.before.id); }
   }
   await db.from("fm_moves").delete().eq("batch_id", brain.lastBatch);
   brain.log.push({ who: "ap", text: `Undid ${moves.length} change${moves.length === 1 ? "" : "s"}.` });
@@ -913,6 +952,10 @@ function renderBrainPanel(r) {
         else if (a.kind === "complete") line = `Done: "${a.title}"`;
         else if (a.kind === "delete") line = `Removed "${a.title}" (it's in the Trash)`;
         else if (a.kind === "restore") line = `Put back "${a.title}"`;
+        else if (a.kind === "bill_paid") line = `Paid ✓ ${a.title}`;
+        else if (a.kind === "bill_unpaid") line = `Un-paid: ${a.title}`;
+        else if (a.kind === "bill_add") line = `New bill: ${a.title}`;
+        else if (a.kind === "bill_update") line = `Changed bill: ${a.title}`;
         ul.append(el("li", "", line));
       });
       b.append(ul);
@@ -1048,8 +1091,24 @@ function renderSkinny(r) {
   if (overdue.length) parts.push(`!! ${overdue.length} overdue`);
   if (dueToday.length) parts.push(`${dueToday.length} drop-dead today`);
   if (overDays.length) parts.push(`${overDays.length} day${overDays.length === 1 ? "" : "s"} over 8 h`);
+  const lateBills = B.loaded ? pastDue(today).length : 0;
+  if (lateBills) parts.push(`!! ${lateBills} bill${lateBills === 1 ? "" : "s"} past due`);
   const sStat = card(r, "Status");
   sStat.append(el("div", "status" + (parts.length ? "" : " ok"), parts.length ? parts.join(" · ") : "On track"));
+  if (B.loaded) {   // bills: a past-due line in every view (they always get paid); the month tally only on Home / Both
+    const late = pastDue(today);
+    if (late.length) {
+      const row = el("div", "row link bills-late");
+      row.append(el("b", "", `!! ${late.length} bill${late.length === 1 ? "" : "s"} past due`), el("i", "", `${money(amountOf(late))} · $ Bills →`));
+      row.title = late.map((o) => `${o.bill.name} ${money(o.bill.amount)} — due ${fmtShort(o.due)}`).join("\n");
+      row.addEventListener("click", () => setBucket("bills")); sStat.append(row);
+    } else if (state.bucket !== "work") {
+      const d = new Date(), S = monthStats(d.getFullYear(), d.getMonth(), today), nx = nextDue(today);
+      const row = el("div", "row link");
+      row.append(el("b", "", `$ Bills: ${money(S.left, false)} left this month`), el("i", "", nx ? `next ${nx.bill.name} ${money(nx.bill.amount, false)} ${fmtShort(nx.due).split(",")[0]} →` : "→"));
+      row.addEventListener("click", () => setBucket("bills")); sStat.append(row);
+    }
+  }
   const risky = state.tasks.filter((t) => visible(t) && t.status !== "done" && t.scheduled_date !== today && (
     (t.dropdead_date && t.dropdead_date < today) || (t.target_date && t.target_date < today)
   )).sort(byPriority);
@@ -1232,12 +1291,16 @@ function renderPhone() {
   });
   const r = $("rail-body");
   r.innerHTML = "";
-  if (state.panel === "day" && state.selected) return renderDayPanel(r);
+  if (state.panel === "addbill") return renderAddBillPanel(r);
+  if (state.panel === "accounts") return renderAccountsPanel(r);
+  if (state.panel === "billalerts") return renderBillAlertsPanel(r);
+  if (state.panel === "day" && state.selected) return billsMode() ? renderBillDayPanel(r) : renderDayPanel(r);
   if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
   if (state.panel === "done") return renderDonePanel(r);
   if (state.panel === "trash") return renderTrashPanel(r);
   if (state.panel === "add") return renderAddPanel(r);
   if (state.panel === "brain") return renderBrainPanel(r);
+  if (state.tab === "bills") return renderBillsPanel(r);
   if (state.tab === "month") return renderPhoneMonth(r);
   renderPhoneWeek(r);
 }
@@ -1246,7 +1309,7 @@ function phoneTab(tab) {
   state.openId = null; state.editId = null;
   if (tab === "add") { state.tab = "add"; state.panel = "add"; }
   else if (tab === "brain") { state.tab = "brain"; state.panel = "brain"; }
-  else { state.tab = tab; state.panel = null; if (tab === "week") state.pWeek = null; if (tab === "month") state.pMonth = null; }
+  else { state.tab = tab; state.panel = null; state.billOpen = null; if (tab === "week") state.pWeek = null; if (tab === "month") state.pMonth = null; }
   render({ now: true });
   const rail = $("rail"); if (rail) rail.scrollTop = 0;
 }
@@ -1476,7 +1539,7 @@ function addPick() {
   if (!state.addPick) state.addPick = { date: todayISO(), priority: "normal", size: "1h", sizeSet: false, hrs: "", bucket: null };
   return state.addPick;
 }
-function addBucket() { const k = addPick(); return k.bucket || (state.bucket === "both" ? "work" : state.bucket); }
+function addBucket() { const k = addPick(); return k.bucket || (state.bucket === "both" ? "work" : state.bucket === "bills" ? "home" : state.bucket); }
 // the next few days he can land work on: today, tomorrow, then the rest of the week (work skips weekends + days off)
 function addDayChoices() {
   const out = [], work = addBucket() === "work";
@@ -1712,7 +1775,13 @@ function openDay(dateISO, taskId = null) {
 }
 function openUnscheduled(taskId = null) { state.panel = "unscheduled"; state.openId = taskId; state.editId = null; render(); }
 function openAdd() { state.panel = "add"; state.openId = null; state.editId = null; render({ now: true }); }
-function closePanel() { state.panel = null; state.openId = null; state.editId = null; if (state.tab === "add" || state.tab === "brain") state.tab = "week"; render({ now: true }); }
+function closePanel() { state.panel = null; state.openId = null; state.editId = null; state.billOpen = null; state.billDraft = null; state.billEditId = null; if (state.tab === "add" || state.tab === "brain") state.tab = "week"; render({ now: true }); }
+function openBillDay(dateISO, billId = null) {
+  state.selected = dateISO; state.panel = "day"; state.billOpen = billId; state.openId = null; state.editId = null;
+  state.panelJump = billId != null;
+  render({ now: true });
+}
+function setBucket(b) { state.bucket = b; localStorage.setItem("fm.bucket", b); closeBillPeek(); if (state.panel === "day") { state.panel = null; state.openId = null; state.billOpen = null; } render({ now: true }); }
 
 // ---------- quick add parsing ----------
 // "Send James layout fri !!"  → title, priority urgent, date next Friday
@@ -1746,7 +1815,7 @@ async function quickAdd(text) {
   const p = parseQuick(text);
   if (!p.title) return;
   const date = p.date || (state.panel === "day" && state.selected ? state.selected : (state.view === "day" ? iso(state.cursor) : todayISO()));
-  const row = { title: p.title, priority: p.priority, bucket: p.bucket || (state.bucket === "both" ? "work" : state.bucket), job: p.job, scheduled_date: date, source: "quick" };
+  const row = { title: p.title, priority: p.priority, bucket: p.bucket || (state.bucket === "both" ? "work" : state.bucket === "bills" ? "home" : state.bucket), job: p.job, scheduled_date: date, source: "quick" };
   const t = await insertTask(row);
   if (!t) return;
   toast(`Added to ${fmtShort(date)} — set size, target and drop-dead if it has them`);
@@ -1905,7 +1974,7 @@ function badgeCount() {
   const today = todayISO();
   return state.tasks.filter((t) => t.status !== "done" && (
     (t.priority === "urgent" && (!t.scheduled_date || t.scheduled_date <= today)) ||
-    (t.dropdead_date && t.dropdead_date <= today))).length;
+    (t.dropdead_date && t.dropdead_date <= today))).length + (B.loaded ? pastDue(today).length : 0);
 }
 function updateBadge() {
   if (!("setAppBadge" in navigator)) return;
@@ -1943,6 +2012,17 @@ function alertTick() {
   // 7:00 — anything with a drop-dead today
   const dd = state.tasks.filter((t) => t.status !== "done" && t.dropdead_date === today);
   if (h >= 7 && dd.length) once("dd:" + today, () => notify(`Drop-dead today: ${dd.length}`, dd.map((t) => "• " + t.title).join("\n"), "dd"));
+  // bills: each one `remind_days` before it is due and on the due day; anything past due every morning — once a day each
+  if (h >= 7 && B.loaded) {
+    dueWithin(today, 7).forEach((o) => {
+      const dl = daysBetween(today, o.due);
+      if (dl > (o.bill.remind_days ?? 2)) return;
+      const pays = acctLabel(o.bill.account_id);
+      once(`bill:${o.bill.id}:${o.due}`, () => notify(dl === 0 ? `Bill due today — ${o.bill.name} ${money(o.bill.amount)}` : `Bill due ${fmtShort(o.due).split(",")[0]} — ${o.bill.name} ${money(o.bill.amount)}`, (pays ? "pays from " + pays + " · " : "") + "$ Bills → Paid ✓ when it's done", "bill-" + o.bill.id));
+    });
+    const late = pastDue(today);
+    if (late.length) once("bills-late:" + late.length, () => notify(`!! ${late.length} bill${late.length === 1 ? "" : "s"} past due — ${money(amountOf(late))}`, late.slice(0, 4).map((o) => `• ${o.bill.name} ${money(o.bill.amount)} (${daysLate(o.due, today)} d)`).join("\n"), "bills-late"));
+  }
   // nags: every nag_hours from 7 a.m. until done, work hours only
   if (h >= 7 && h < 16) state.tasks.filter((t) => t.status !== "done" && t.nag_hours > 0 && t.scheduled_date && t.scheduled_date <= today).forEach((t) => {
     const slot = Math.floor((h - 7 + mn / 60) / t.nag_hours);
@@ -2017,6 +2097,451 @@ async function openMini() {
 }
 function initMini() { const b = $("mini-btn"); if (b) b.addEventListener("click", openMini); }
 
+// ============================================================
+//  BILLS — the $ Bills view (month grid of bill chips), the hover summary on the
+//  button, the panel (tally · past due · due soon · later · paid · accounts),
+//  bill cards with Paid ✓ / Edit / Photo / Remove, add + edit, accounts, phone alerts.
+//  Data layer: bills.js. Rule: a bill is paid only when Adam says so (Paid ✓, the
+//  Assistant, or Claude on his word) — nothing marks itself paid.
+// ============================================================
+const RECUR = { monthly: "Every month", biweekly: "Every 2 weeks", yearly: "Every year", once: "One time" };
+const REMIND = [[0, "Due day"], [1, "1 day"], [2, "2 days"], [3, "3 days"], [7, "1 week"]];
+
+function billLogo(b, cls = "logo") {
+  const url = logoUrl(b.domain);
+  if (!url) return el("span", "ini" + (cls.includes("big") ? " big" : ""), initials(b.name));
+  const img = el("img", cls); img.src = url; img.alt = ""; img.loading = "lazy";
+  img.addEventListener("error", () => img.replaceWith(el("span", "ini" + (cls.includes("big") ? " big" : ""), initials(b.name))), { once: true });
+  return img;
+}
+function lateWord(o, today) { const n = daysLate(o.due, today); return `${n} day${n === 1 ? "" : "s"} LATE`; }
+
+// a bill on a day of the month grid: logo · name · $. Paid = ✓ faded. Late = red dashed + LATE. Due today = DUE.
+function billChip(o) {
+  const today = todayISO(), st = statusOf(o.bill, o.due, today);
+  const c = el("div", "bchip st-" + st);
+  if (st === "paid") c.append(el("span", "ok", "✓"));
+  c.append(billLogo(o.bill), el("span", "nm", o.bill.name), el("span", "amt", money(o.bill.amount, false)));
+  if (st === "late") c.append(el("span", "tag", "LATE"));
+  else if (st === "today") c.append(el("span", "tag", "DUE"));
+  const pays = acctLabel(o.bill.account_id);
+  c.title = `${o.bill.name} · ${money(o.bill.amount)} · due ${fmtShort(o.due)}` + (st === "paid" ? ` · paid ${whenShort(paymentFor(o.bill, o.due).paid_at)}` : st === "late" ? ` · ${lateWord(o, today)}` : "") + (pays ? ` · pays from ${pays}` : "") + " · click to open";
+  c.dataset.bill = o.bill.id; c.dataset.due = o.due;
+  c.addEventListener("click", (e) => { e.stopPropagation(); openBillDay(o.due, o.bill.id); });
+  return c;
+}
+
+// a day cell in $ Bills mode: bill chips + the day's total; past days say PAID or N LATE
+function billDayCell(d, { other = false, max = 4, fit = 0 } = {}) {
+  const dISO = iso(d), today = todayISO();
+  const cell = el("div", "day bills");
+  if (other) cell.classList.add("other");
+  if (isWeekend(dISO)) cell.classList.add("weekend");
+  const isToday = dISO === today;
+  if (isToday) cell.classList.add("today"); else if (dISO < today) cell.classList.add("past");
+  if (dISO === state.selected && state.panel === "day") cell.classList.add("selected");
+  const occ = occOn(dISO);
+  const num = el("div", "num");
+  const numLabel = el("span", "", String(d.getDate()));
+  if (isToday) numLabel.append(el("b", "today-tag", "TODAY"));
+  num.append(numLabel);
+  if (occ.length) {
+    const nLate = occ.filter((o) => statusOf(o.bill, o.due, today) === "late").length;
+    const tot = el("span", "count money" + (nLate ? " late" : ""), money(amountOf(occ), false));
+    tot.title = `${occ.length} bill${occ.length === 1 ? "" : "s"} · ${money(amountOf(occ))}${nLate ? ` · ${nLate} LATE` : ""}`;
+    num.append(tot);
+  }
+  cell.append(num);
+  let show = Math.min(occ.length, fit ? Math.max(1, fit) : 99, max + 1);
+  if (occ.length > show) show = Math.max(0, show - 1);
+  occ.slice(0, show).forEach((o) => cell.append(billChip(o)));
+  if (occ.length > show) { const m = el("div", "more", `+${occ.length - show} more`); m.title = occ.slice(show).map((o) => `${o.bill.name} ${money(o.bill.amount, false)}`).join("\n"); cell.append(m); }
+  if (!isToday && dISO < today && occ.length) {
+    const nLate = occ.filter((o) => statusOf(o.bill, o.due, today) === "late").length;
+    const st = el("span", "stamp" + (nLate ? " open" : ""), nLate ? `${nLate} LATE` : "PAID");
+    st.title = nLate ? `${nLate} bill${nLate === 1 ? "" : "s"} on this day not marked paid` : "Everything due this day is marked paid";
+    cell.append(st);
+  }
+  cell.addEventListener("click", () => openBillDay(dISO));
+  return cell;
+}
+
+// Paid ✓ and its undo — the two things he presses most
+async function doPay(o, { source = "app" } = {}) {
+  const r = await markPaid(db, o.bill, o.due, { source });
+  if (r !== true) { toast("Couldn't save: " + r); return false; }
+  pushUndo(`Paid "${o.bill.name}"`, async () => (await unmarkPaid(db, o.bill, o.due)) === true);
+  toast(`Paid ✓ ${o.bill.name} — ${money(o.bill.amount)}`, { undo: true });
+  render({ now: true });
+  return true;
+}
+async function doUnpay(o) {
+  const r = await unmarkPaid(db, o.bill, o.due);
+  if (r !== true) { toast("Couldn't save: " + r); return false; }
+  pushUndo(`Un-paid "${o.bill.name}"`, async () => (await markPaid(db, o.bill, o.due)) === true);
+  toast(`${o.bill.name} is back to unpaid`, { undo: true });
+  render({ now: true });
+  return true;
+}
+
+// one bill, one line: logo · name + when · $ · Paid ✓
+function billRow(o, { when = true } = {}) {
+  const today = todayISO(), st = statusOf(o.bill, o.due, today);
+  const row = el("div", "brow st-" + st);
+  row.append(billLogo(o.bill));
+  const tt = el("span", "tt"); tt.append(el("b", "", o.bill.name));
+  const bits = [];
+  if (when) bits.push(fromISO(o.due).toLocaleDateString("en-US", { month: "short", day: "numeric" }));
+  if (st === "late") bits.push(lateWord(o, today));
+  else if (st === "today") bits.push("DUE TODAY");
+  else if (st === "paid") bits.push("paid " + whenShort(paymentFor(o.bill, o.due).paid_at));
+  if (o.bill.autopay && st !== "paid") bits.push("autopay");
+  const al = acctLabel(o.bill.account_id); if (al && st !== "paid") bits.push(al);
+  tt.append(el("small", "", bits.join(" · ")));
+  row.append(tt, el("span", "amt", money(o.bill.amount)));
+  const btn = el("button", "btn sm " + (st === "paid" ? "ghost" : "pay"), st === "paid" ? "undo" : "Paid ✓");
+  btn.title = st === "paid" ? "Mark it unpaid again" : "Mark this one paid (Undo if you slip)";
+  btn.addEventListener("click", (e) => { e.stopPropagation(); st === "paid" ? doUnpay(o) : doPay(o); });
+  row.append(btn);
+  row.title = `${o.bill.name} · ${money(o.bill.amount)} · due ${fmtShort(o.due)} — click to open`;
+  row.addEventListener("click", () => openBillDay(o.due, o.bill.id));
+  return row;
+}
+
+// the panel in $ Bills mode: tally first, then past due, due soon, later, paid, accounts
+function renderBillsPanel(r) {
+  const today = todayISO();
+  const cur = isPhone() ? new Date() : state.cursor;
+  const y = cur.getFullYear(), m = cur.getMonth();
+  const S = monthStats(y, m, today), late = pastDue(today), week = dueWithin(today, 7);
+  const monthName = cur.toLocaleDateString("en-US", { month: "long" });
+  // 1. TALLY
+  const sT = card(r, `Bills · ${monthName}`, { sub: `${S.nPaid} of ${S.nTotal} paid`, cls: "focus bq-card" });
+  const bq = el("div", "bq");
+  const top = el("div", "top"); top.append(el("span", "huge", money(S.left, false)), el("span", "of", `of ${money(S.total, false)}`)); bq.append(top);
+  bq.append(el("div", "lbl", `LEFT TO PAY IN ${monthName.toUpperCase()}`));
+  const bar = el("div", "bar"); const fill = el("i"); fill.style.width = S.pct + "%"; bar.append(fill); bq.append(bar);
+  const bl = el("div", "barlab"); bl.append(el("span", "", `${S.pct}% PAID`), el("span", "", `${money(S.paid, false)} DONE`)); bq.append(bl);
+  const strip = el("div", "strip");
+  const box = (n, l, cls, title) => { const b = el("div", "box" + (cls ? " " + cls : "")); b.append(el("b", "", String(n)), el("small", "", l)); if (title) b.title = title; return b; };
+  strip.append(
+    box(late.length, "PAST DUE", late.length ? "late" : "", late.length ? money(amountOf(late)) + " not marked paid" : "Nothing past due"),
+    box(week.length, "DUE IN 7 DAYS", "", week.length ? money(amountOf(week)) : "Nothing due this week"),
+    box(money(amountOf(late) + amountOf(week), false), "NEEDED NOW", "", "Past due + the next 7 days"));
+  bq.append(strip); sT.append(bq);
+  // 2. PAST DUE — always first, always loud
+  if (late.length) { const sL = card(r, "!! Past due", { sub: `${money(amountOf(late))} · not marked paid`, cls: "late" }); late.forEach((o) => sL.append(billRow(o))); }
+  // 3. DUE IN THE NEXT 7 DAYS
+  const sW = card(r, "Due in the next 7 days", { sub: week.length ? money(amountOf(week)) : "" });
+  if (!week.length) sW.append(el("div", "empty", "Nothing due in the next 7 days."));
+  week.forEach((o) => sW.append(billRow(o)));
+  // 4. LATER THIS MONTH
+  const later = [...S.soon, ...S.open].filter((o) => !week.some((w) => w.bill.id === o.bill.id && w.due === o.due) && o.due >= today).sort((a, b) => a.due.localeCompare(b.due));
+  if (later.length) { const sO = card(r, `Later in ${monthName}`, { sub: money(amountOf(later)) }); later.forEach((o) => sO.append(billRow(o))); }
+  // 5. PAID
+  const sP = card(r, `Paid in ${monthName}`, { sub: S.paidList.length ? `${S.paidList.length} · ${money(S.paid)}` : "" });
+  if (!S.paidList.length) sP.append(el("div", "empty", "Nothing marked paid yet this month."));
+  S.paidList.slice().sort((a, b) => b.due.localeCompare(a.due)).forEach((o) => sP.append(billRow(o)));
+  // 6. ACCOUNTS — what comes out of each one this month
+  renderAccountsCard(r, y, m);
+  // 7. buttons
+  const act = el("div", "sec actions-row");
+  const add = el("button", "btn primary sm", "+ Add bill"); add.addEventListener("click", () => openAddBill());
+  const acc = el("button", "btn sm", "Accounts"); acc.addEventListener("click", () => openPanel("accounts"));
+  const al = el("button", "btn sm", "Phone alerts"); al.title = "Your bills as a calendar on iPhone / Apple Watch, with alerts before each due date"; al.addEventListener("click", () => openPanel("billalerts"));
+  act.append(add, acc, al); r.append(act);
+  if (!B.bills.length) { const sE = card(r, "No bills yet"); sE.append(el("div", "empty", "Press + Add bill. Name, amount, due date — the rest is optional.")); }
+}
+
+function renderAccountsCard(r, y, m) {
+  if (!B.accounts.length && !B.bills.some((b) => b.account_id)) return;
+  const sA = card(r, "Accounts", { sub: "what each one pays this month" });
+  const occ = monthStats(y, m, todayISO());
+  const all = [...occ.late, ...occ.soon, ...occ.open, ...occ.paidList];
+  const rowFor = (label, list, cls = "") => {
+    const row = el("div", "acct" + (cls ? " " + cls : ""));
+    const left = list.filter((o) => !paymentFor(o.bill, o.due)).reduce((a, o) => a + o.bill.amount, 0);
+    row.append(el("b", "", label), el("i", "", list.length ? `${list.length} bill${list.length === 1 ? "" : "s"} · ${money(amountOf(list), false)}${left ? ` · ${money(left, false)} still to pay` : " · all paid"}` : "nothing this month"));
+    return row;
+  };
+  B.accounts.forEach((a) => sA.append(rowFor(acctLabel(a.id, { full: true }), all.filter((o) => o.bill.account_id === a.id))));
+  const none = all.filter((o) => !o.bill.account_id);
+  if (none.length) { const row = rowFor("? No account set", none, "none"); row.title = "Open each bill → Edit → Pays from"; sA.append(row); }
+  sA.addEventListener("click", () => openPanel("accounts"));
+}
+
+// a bill opened in the panel: everything about it + the buttons
+function billCard(o) {
+  const b = o.bill, today = todayISO(), st = statusOf(b, o.due, today);
+  const c = el("div", "item bill st-" + st); c.dataset.bill = b.id;
+  const head = el("div", "head");
+  head.append(billLogo(b, "logo big"), el("span", "title", b.name), el("span", "bamt", money(b.amount)));
+  const pill = el("span", "status-pill " + (st === "late" ? "overdue" : st === "paid" ? "done" : st === "today" || st === "soon" ? "warn" : ""),
+    st === "paid" ? "✓ Paid" : st === "late" ? `!! ${lateWord(o, today)}` : st === "today" ? "DUE TODAY" : `Due ${fmtShort(o.due).replace(",", "")}`);
+  head.append(pill);
+  c.append(head);
+  const p = paymentFor(b, o.due);
+  const dt = el("div", "detail");
+  dt.innerHTML = `<b>Due:</b> ${esc(fmtShort(o.due))} · <b>Repeats:</b> ${esc(RECUR[b.recur] || b.recur)} · <b>Remind:</b> ${b.remind_days === 0 ? "on the day" : `${b.remind_days} day${b.remind_days === 1 ? "" : "s"} before`}`
+    + `<br><b>Pays from:</b> ${esc(acctLabel(b.account_id, { full: true }) || "— not set")}${b.autopay ? " · <b>Autopay</b>" : ""}`
+    + (b.domain ? ` · <b>Site:</b> <a href="https://${esc(b.domain)}" target="_blank" rel="noopener">${esc(b.domain)}</a>` : "")
+    + (p ? `<br><b>Paid:</b> ${esc(whenShort(p.paid_at))}${p.source && p.source !== "app" ? ` (${esc(p.source)})` : ""}${p.note ? " · " + esc(p.note) : ""}` : "")
+    + (b.ended_on ? `<br><b>Ends:</b> ${esc(fmtShort(b.ended_on))}` : "")
+    + (b.notes ? `<br><b>Notes:</b> ${esc(b.notes)}` : "");
+  c.append(dt);
+  if (b.photo) { const ph = el("div", "bphoto"); const img = el("img"); img.src = b.photo; img.alt = b.name + " bill"; img.title = "Open full size"; img.addEventListener("click", (e) => { e.stopPropagation(); const w = window.open("", "_blank"); if (w) { w.document.write(`<title>${esc(b.name)}</title><img src="${b.photo}" style="max-width:100%">`); w.document.close(); } }); ph.append(img); c.append(ph); }
+  const btn = (label, fn, cls = "btn sm") => { const x = el("button", cls, label); x.addEventListener("click", (e) => { e.stopPropagation(); fn(); }); return x; };
+  const r1 = el("div", "actions r3");
+  r1.append(st === "paid" ? btn("Undo paid", () => doUnpay(o)) : btn("✓ Paid", () => doPay(o), "btn sm olive"));
+  r1.append(btn("✎ Edit", () => openAddBill(b), "btn sm primary edit"));
+  r1.append(btn(b.photo ? "📷 New photo" : "📷 Add photo", () => pickBillPhoto(b)));
+  c.append(r1);
+  const r2 = el("div", "actions r2");
+  r2.append(btn("Remove bill", async () => {
+    if (!confirm(`Remove "${b.name}" from your bills?\nIt goes to the Trash (Undo brings it back); paid history stays.`)) return;
+    const res = await removeBill(db, b);
+    if (res !== true) { toast("Couldn't remove: " + res); return; }
+    pushUndo(`Remove bill "${b.name}"`, async () => (await restoreBill(db, b.id)) === true);
+    toast(`Removed ${b.name}`, { undo: true });
+    closePanel();
+  }, "btn sm danger"));
+  if (b.photo) r2.append(btn("Remove photo", async () => { const res = await saveBill(db, { photo: null }, b.id); if (typeof res === "string") { toast("Couldn't save: " + res); return; } toast("Photo removed"); render({ now: true }); }));
+  c.append(r2);
+  return c;
+}
+
+// the day panel in $ Bills mode: the bill he clicked first, then the rest of the day, then what's coming
+function renderBillDayPanel(r) {
+  const d = state.selected, occ = occOn(d);
+  panelHeader(r, fmtLong(d), `${occ.length} bill${occ.length === 1 ? "" : "s"}${occ.length ? " · " + money(amountOf(occ)) : ""}`);
+  const picked = state.billOpen != null ? occ.find((o) => o.bill.id === state.billOpen) : null;
+  if (picked) {
+    const sP = card(r, "Selected", { sub: "what you clicked — work in it right here", cls: "pick" });
+    sP.append(billCard(picked));
+    if (state.panelJump) { state.panelJump = false; requestAnimationFrame(() => { const p = $("rail"); if (p) p.scrollTop = 0; }); }
+  }
+  const rest = picked ? occ.filter((o) => o !== picked) : occ;
+  if (!picked || rest.length) {
+    const sT = card(r, picked ? "Also due this day" : "Bills due", { sub: rest.length ? "click one for detail" : "" });
+    if (!occ.length) sT.append(el("div", "empty", "No bills due this day."));
+    rest.forEach((o) => sT.append(billCard(o)));
+  }
+  const soon = dueWithin(d, 10).filter((o) => o.due > d);
+  if (soon.length) { const sC = card(r, "Coming up", { sub: "next 10 days" }); soon.slice(0, 8).forEach((o) => sC.append(billRow(o))); }
+  const act = el("div", "sec actions-row");
+  const add = el("button", "btn primary sm", `+ Add bill due ${fmtShort(d).split(",")[1]?.trim() || fmtShort(d)}`); add.addEventListener("click", () => openAddBill({ anchor_date: d }));
+  act.append(add); r.append(act);
+}
+
+// ---------- the hover summary on the $ Bills button ----------
+let peekEl = null, peekTimer = null;
+function closeBillPeek() { clearTimeout(peekTimer); if (peekEl) { peekEl.remove(); peekEl = null; } }
+function scheduleClosePeek() { clearTimeout(peekTimer); peekTimer = setTimeout(closeBillPeek, 260); }
+function openBillPeek(anchor) {
+  clearTimeout(peekTimer);
+  if (peekEl || !B.loaded) return;
+  const today = todayISO(), d = new Date();
+  const S = monthStats(d.getFullYear(), d.getMonth(), today), late = pastDue(today), week = dueWithin(today, 7);
+  const p = el("div", "pop billpeek");
+  const h = el("div", "ttl"); h.append(el("b", "", d.toLocaleDateString("en-US", { month: "long" })), ` · ${money(S.left, false)} left of ${money(S.total, false)} · ${S.nPaid} of ${S.nTotal} paid`); p.append(h);
+  const peekRow = (o) => {
+    const st = statusOf(o.bill, o.due, today);
+    const row = el("div", "pr st-" + st);
+    row.append(billLogo(o.bill), el("span", "nm", o.bill.name), el("span", "wh", st === "late" ? lateWord(o, today) : st === "today" ? "DUE TODAY" : fmtShort(o.due).split(",")[0]), el("span", "amt", money(o.bill.amount, false)));
+    const b = el("button", "btn sm pay", "Paid ✓"); b.addEventListener("click", (e) => { e.stopPropagation(); doPay(o); closeBillPeek(); }); row.append(b);
+    row.addEventListener("click", () => { closeBillPeek(); setBucket("bills"); openBillDay(o.due, o.bill.id); });
+    return row;
+  };
+  if (late.length) { p.append(el("div", "ph late", `!! PAST DUE · ${money(amountOf(late))}`)); late.slice(0, 4).forEach((o) => p.append(peekRow(o))); if (late.length > 4) p.append(el("div", "hint", `+${late.length - 4} more past due`)); }
+  p.append(el("div", "ph", `DUE IN 7 DAYS · ${money(amountOf(week))}`));
+  if (!week.length) p.append(el("div", "empty", "Nothing due this week."));
+  week.slice(0, 6).forEach((o) => p.append(peekRow(o)));
+  p.append(el("div", "hint", "Click $ Bills for the full view"));
+  p.addEventListener("mouseenter", () => clearTimeout(peekTimer));
+  p.addEventListener("mouseleave", scheduleClosePeek);
+  p.addEventListener("click", (e) => e.stopPropagation());
+  document.body.append(p);
+  placePop(p, anchor, 340, 280);
+  peekEl = p;
+}
+
+// ---------- add / edit a bill ----------
+function billDraft() {
+  if (!state.billDraft) state.billDraft = { name: "", domain: "", amount: "", anchor_date: todayISO(), recur: "monthly", account_id: null, remind_days: 2, autopay: false, notes: "", photo: null, ended_on: "" };
+  return state.billDraft;
+}
+function openAddBill(seed = null) {
+  if (seed && seed.id) {   // edit
+    state.billEditId = seed.id;
+    state.billDraft = { name: seed.name, domain: seed.domain || "", amount: String(seed.amount), anchor_date: seed.anchor_date, recur: seed.recur, account_id: seed.account_id, remind_days: seed.remind_days ?? 2, autopay: !!seed.autopay, notes: seed.notes || "", photo: seed.photo || null, ended_on: seed.ended_on || "" };
+  } else {
+    state.billEditId = null; state.billDraft = null; const k = billDraft(); if (seed && seed.anchor_date) k.anchor_date = seed.anchor_date;
+  }
+  state.panel = "addbill"; state.openId = null; state.editId = null;
+  render({ now: true });
+  const p = $("rail"); if (p) p.scrollTop = 0;
+  requestAnimationFrame(() => { const n = document.querySelector("#rail-body input[name=bname]"); if (n && !state.billEditId) n.focus(); });
+}
+function renderAddBillPanel(r) {
+  const k = billDraft(), editing = state.billEditId != null;
+  panelHeader(r, editing ? "Edit bill" : "Add a bill", editing ? k.name : "name · amount · due date — the rest is optional");
+  const opt = (row, label, on, fn, title) => { const b = el("button", "o" + (on ? " on" : ""), label); b.type = "button"; if (title) b.title = title; b.addEventListener("click", () => { fn(); render({ now: true }); }); row.append(b); return b; };
+  const field = (sec, label, name, type, value, { placeholder = "", step = null, min = null } = {}) => {
+    const l = el("label", "bf", label); const i = el("input"); i.type = type; i.name = name; i.value = value ?? ""; if (placeholder) i.placeholder = placeholder; if (step) i.step = step; if (min != null) i.min = min;
+    i.addEventListener("input", () => { k[name === "bname" ? "name" : name] = i.value; if (name === "domain" || name === "bname") updateLogoPreview(); });
+    if (type === "date") i.addEventListener("click", () => { try { i.showPicker(); } catch {} });
+    l.append(i); sec.append(l); return i;
+  };
+  // WHAT
+  const sW = card(r, "What is it?");
+  const body = el("div", "bform"); sW.append(body);
+  field(body, "Name", "bname", "text", k.name, { placeholder: "e.g. Puget Sound Energy" });
+  field(body, "Website (for the logo)", "domain", "text", k.domain, { placeholder: "e.g. pse.com" });
+  const pv = el("div", "logo-preview"); pv.id = "logo-preview"; body.append(pv);
+  const updateLogoPreview = () => { pv.innerHTML = ""; const dom = cleanDomain(k.domain); if (!k.name && !dom) { pv.append(el("span", "hint", "Logo preview shows here")); return; } pv.append(billLogo({ name: k.name || "?", domain: dom }, "logo big"), el("span", "hint", dom ? `logo from ${dom}` : "no site yet — initials for now")); };
+  updateLogoPreview();
+  // HOW MUCH · WHEN
+  const sA = card(r, "How much, and when");
+  const b2 = el("div", "bform two"); sA.append(b2);
+  field(b2, "Amount", "amount", "number", k.amount, { placeholder: "0.00", step: "0.01", min: "0" });
+  field(b2, editing ? "A due date it falls on" : "Due date", "anchor_date", "date", k.anchor_date);
+  const sR = el("div", "picks"); sA.append(el("div", "bf-lab", "Repeats"));
+  Object.entries(RECUR).forEach(([v, txt]) => opt(sR, txt, k.recur === v, () => { k.recur = v; }));
+  sA.append(sR);
+  // PAYS FROM
+  const sF = card(r, "Pays from", { sub: "which account the money comes out of" });
+  const pf = el("div", "picks");
+  opt(pf, "— not set", k.account_id == null, () => { k.account_id = null; });
+  B.accounts.forEach((a) => opt(pf, acctLabel(a.id, { full: true }), k.account_id === a.id, () => { k.account_id = a.id; }));
+  const addA = el("button", "o dash", "+ account"); addA.type = "button"; addA.addEventListener("click", () => openPanel("accounts")); pf.append(addA);
+  sF.append(pf);
+  const ap = el("label", "bf check"); const cb = el("input"); cb.type = "checkbox"; cb.checked = !!k.autopay; cb.addEventListener("change", () => { k.autopay = cb.checked; }); ap.append(cb, el("span", "", " Autopay — it pays itself; you just confirm it went through")); sF.append(ap);
+  // REMIND
+  const sM = card(r, "Remind me", { sub: "a pop-up before it's due (Alerts: on, top right)" });
+  const rm = el("div", "picks");
+  REMIND.forEach(([d, txt]) => opt(rm, txt, k.remind_days === d, () => { k.remind_days = d; }));
+  sM.append(rm);
+  // NOTES · PHOTO · ENDS
+  const sN = card(r, "Notes, photo, end date", { sub: "optional" });
+  const nb = el("div", "bform"); sN.append(nb);
+  const nl = el("label", "bf", "Notes"); const ta = el("textarea"); ta.value = k.notes || ""; ta.placeholder = "account number hints, login, anything you need when paying"; ta.addEventListener("input", () => { k.notes = ta.value; }); nl.append(ta); nb.append(nl);
+  const pw = el("div", "photo-row");
+  const pb = el("button", "btn sm", k.photo ? "📷 Change photo" : "📷 Take or attach a photo of the bill"); pb.type = "button"; pb.addEventListener("click", () => pickPhotoInto((data) => { k.photo = data; render({ now: true }); }));
+  pw.append(pb);
+  if (k.photo) { const t = el("div", "bphoto"); const img = el("img"); img.src = k.photo; t.append(img); const x = el("button", "btn sm ghost", "Remove photo"); x.type = "button"; x.addEventListener("click", () => { k.photo = null; render({ now: true }); }); pw.append(t, x); }
+  nb.append(pw);
+  field(nb, "Ends on (last due date — paid-off loan, cancelled service)", "ended_on", "date", k.ended_on);
+  // GO
+  const go = card(r, "Go");
+  const act = el("div", "actions");
+  const save = el("button", "btn primary", editing ? "Save changes" : "Add bill"); save.type = "button";
+  save.addEventListener("click", async () => {
+    const amt = Number(k.amount);
+    if (!k.name.trim()) { toast("Give it a name"); return; }
+    if (!(amt > 0)) { toast("How much is it?"); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(k.anchor_date || "")) { toast("Pick the due date"); return; }
+    const row = { name: k.name.trim(), domain: cleanDomain(k.domain) || null, amount: Math.round(amt * 100) / 100, anchor_date: k.anchor_date, recur: k.recur, account_id: k.account_id, remind_days: k.remind_days, autopay: !!k.autopay, notes: k.notes?.trim() || null, photo: k.photo || null, ended_on: k.ended_on || null };
+    if (!editing) row.sort = Number(k.anchor_date.slice(8, 10));
+    const res = await saveBill(db, row, editing ? state.billEditId : null);
+    if (typeof res === "string") { toast("Couldn't save: " + res); return; }
+    if (!editing) pushUndo(`Add bill "${res.name}"`, async () => (await removeBill(db, res)) === true);
+    toast(editing ? `Saved ${res.name}` : `Added ${res.name} — ${money(res.amount)} ${RECUR[res.recur].toLowerCase()}`, { undo: !editing });
+    const due = res.anchor_date;
+    state.billDraft = null; state.billEditId = null;
+    if (isPhone()) { state.tab = "bills"; state.panel = null; render({ now: true }); }
+    else { if (state.bucket !== "bills") setBucket("bills"); state.cursor = fromISO(due); state.mJump = iso(firstOfMonth(state.cursor)); openBillDay(due, res.id); }
+  });
+  const cancel = el("button", "btn", "Cancel"); cancel.type = "button"; cancel.addEventListener("click", () => { state.billDraft = null; state.billEditId = null; closePanel(); });
+  act.append(save, cancel); go.append(act);
+}
+// camera / file → downsized JPEG data URL (fits in a row; the old app did the same)
+function pickPhotoInto(done) {
+  const inp = el("input"); inp.type = "file"; inp.accept = "image/*"; inp.setAttribute("capture", "environment"); inp.className = "hidden";
+  inp.addEventListener("change", () => {
+    const f = inp.files && inp.files[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => { const maxW = 1100, sc = Math.min(1, maxW / img.width); const cv = document.createElement("canvas"); cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc); cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height); done(cv.toDataURL("image/jpeg", 0.7)); inp.remove(); };
+      img.src = ev.target.result;
+    };
+    rd.readAsDataURL(f);
+  });
+  document.body.append(inp); inp.click();
+}
+function pickBillPhoto(b) {
+  pickPhotoInto(async (data) => { const res = await saveBill(db, { photo: data }, b.id); if (typeof res === "string") { toast("Couldn't save the photo: " + res); return; } toast("Photo saved"); render({ now: true }); });
+}
+
+// ---------- accounts ----------
+function renderAccountsPanel(r) {
+  panelHeader(r, "Accounts", `${B.accounts.length} · what your bills pay from`);
+  const sL = card(r, "Your accounts", { sub: "bank · nickname · last 4 digits only — never the full number" });
+  if (!B.accounts.length) sL.append(el("div", "empty", "None yet. Add one below, then set 'Pays from' on each bill."));
+  B.accounts.forEach((a) => {
+    const row = el("div", "brow");
+    const tt = el("span", "tt"); tt.append(el("b", "", acctLabel(a.id, { full: true })));
+    const n = B.bills.filter((b) => b.account_id === a.id).length;
+    tt.append(el("small", "", n ? `${n} bill${n === 1 ? "" : "s"}` : "no bills point here yet"));
+    row.append(tt);
+    const ed = el("button", "btn sm", "✎ Edit"); ed.addEventListener("click", () => { state.acctDraft = { id: a.id, bank: a.bank, nick: a.nick || "", last4: a.last4 || "" }; render({ now: true }); });
+    const del = el("button", "btn sm danger", "Delete"); del.addEventListener("click", async () => {
+      if (!confirm(`Delete ${acctLabel(a.id, { full: true })}?${n ? `\n${n} bill(s) point at it — they'll show "no account set" until you pick another.` : ""}`)) return;
+      const res = await deleteAccount(db, a.id); if (res !== true) { toast("Couldn't delete: " + res); return; }
+      toast("Account deleted"); render({ now: true });
+    });
+    row.append(ed, del); sL.append(row);
+  });
+  const k = state.acctDraft || (state.acctDraft = { id: null, bank: "", nick: "", last4: "" });
+  const sF = card(r, k.id ? "Edit account" : "Add an account");
+  const f = el("div", "bform two"); sF.append(f);
+  const fld = (label, name, value, placeholder, maxlength) => { const l = el("label", "bf", label); const i = el("input"); i.type = "text"; i.name = name; i.value = value; i.placeholder = placeholder; if (maxlength) i.maxLength = maxlength; if (name === "last4") i.inputMode = "numeric"; i.addEventListener("input", () => { k[name] = i.value; }); l.append(i); f.append(l); };
+  fld("Bank", "bank", k.bank, "e.g. Qualstar"); fld("Nickname", "nick", k.nick, "e.g. Checking"); fld("Last 4 digits", "last4", k.last4, "1234", 8);
+  const act = el("div", "actions");
+  const save = el("button", "btn primary sm", k.id ? "Save changes" : "Add account"); save.type = "button";
+  save.addEventListener("click", async () => {
+    if (!k.bank.trim()) { toast("Which bank?"); return; }
+    const last4 = String(k.last4).replace(/\D/g, "").slice(-8);
+    const res = await saveAccount(db, { bank: k.bank.trim(), nick: k.nick.trim(), last4: last4 || null }, k.id);
+    if (typeof res === "string") { toast("Couldn't save: " + res); return; }
+    toast(k.id ? "Saved" : `Added ${acctLabel(res.id, { full: true })}`); state.acctDraft = null; render({ now: true });
+  });
+  const back = el("button", "btn sm", k.id ? "Cancel" : (state.billDraft ? "‹ Back to the bill" : "‹ Back")); back.type = "button";
+  back.addEventListener("click", () => { state.acctDraft = null; if (state.billDraft) { state.panel = "addbill"; render({ now: true }); } else closePanel(); });
+  act.append(save, back); sF.append(act);
+}
+
+// ---------- phone alerts: the bills as a subscribed calendar (Apple Calendar reads it, alerts fire by remind_days) ----------
+async function feedToken() {
+  if (state.feedToken) return state.feedToken;
+  const { data } = await db.from("fm_prefs").select("value").eq("key", "bills_feed_token").maybeSingle();
+  let tok = data && typeof data.value === "string" ? data.value : null;
+  if (!tok) {
+    const bytes = new Uint8Array(24); crypto.getRandomValues(bytes); tok = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const { error } = await db.from("fm_prefs").upsert({ key: "bills_feed_token", value: tok }, { onConflict: "user_id,key" });
+    if (error) { toast("Couldn't set up the feed: " + error.message); return null; }
+  }
+  state.feedToken = tok; return tok;
+}
+function renderBillAlertsPanel(r) {
+  panelHeader(r, "Phone alerts", "bills in your iPhone / Apple Watch calendar");
+  const s = card(r, "How it works");
+  s.append(el("div", "row wrap", "Your bills become a calendar called Bills. Each one alerts you before it's due (the bill's own 'Remind me'); mark it paid here and the alert goes away."));
+  const box = el("div", "actions-col"); s.append(box);
+  box.append(el("div", "hint", "One moment…"));
+  feedToken().then((tok) => {
+    box.innerHTML = "";
+    if (!tok) { box.append(el("div", "empty", "Couldn't reach the server — try again in a minute.")); return; }
+    const url = `${CONFIG.SUPABASE_URL}/functions/v1/bills-ics?t=${tok}`;
+    const web = url.replace(/^https:\/\//, "webcal://");
+    const a = el("a", "btn primary", "🔔 Turn on Apple Calendar alerts"); a.href = web; a.title = "On iPhone: Subscribe → Add. On Mac: opens Calendar.";
+    const cp = el("button", "btn", "Copy the link instead"); cp.type = "button";
+    cp.addEventListener("click", () => { const ok = () => { cp.textContent = "Copied ✓"; setTimeout(() => { cp.textContent = "Copy the link instead"; }, 1600); }; if (navigator.clipboard?.writeText) navigator.clipboard.writeText(url).then(ok, () => prompt("Copy this link:", url)); else prompt("Copy this link:", url); });
+    box.append(a, cp);
+    box.append(el("div", "hint", "Copied it? iPhone: Calendar app → Calendars → Add Calendar → Add Subscription Calendar → paste. The feed refreshes every few hours."));
+  });
+}
+
 // ---------- nav ----------
 function shift(n) {
   const c = state.cursor;
@@ -2031,7 +2556,10 @@ function shift(n) {
 }
 
 function wire() {
-  $("bucket-seg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.bucket = b.dataset.bucket; localStorage.setItem("fm.bucket", state.bucket); render(); });
+  $("bucket-seg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; setBucket(b.dataset.bucket); });
+  // hover the $ Bills button → a quick summary; click → the Bills view
+  const bb = document.querySelector('#bucket-seg button[data-bucket="bills"]');
+  if (bb) { bb.addEventListener("mouseenter", () => { if (!isPhone() && !billsMode()) openBillPeek(bb); }); bb.addEventListener("mouseleave", scheduleClosePeek); }
   $("view-seg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.view = b.dataset.view; localStorage.setItem("fm.view", state.view); state.mTop = null; if (state.view === "day" && state.selected) state.cursor = fromISO(state.selected); render(); });
   $("prev-btn").addEventListener("click", () => shift(-1));
   $("next-btn").addEventListener("click", () => shift(1));

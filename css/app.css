@@ -577,3 +577,137 @@ body.mini-only #mini-root { display: block; }
     .panel { height: calc(100dvh - 48px - env(safe-area-inset-top) - 46px - env(safe-area-inset-bottom)); }
   }
 }
+
+/* ======================================================================
+   BILLS (v49, Nov 6 2026) — same rules: white paper, charcoal hairlines, tan + olive fills,
+   red only where it matters. Paid / late / due differ by shape AND wording, never color alone.
+   ====================================================================== */
+#bucket-seg button[data-bucket="bills"] { font-weight: 700; position: relative; }
+#bucket-seg button[data-bucket="bills"].on { background: var(--holiday-bg); }   /* gold = money (Adam's accent pick) */
+.bbadge { display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 900; letter-spacing: 1px; color: #fff; background: var(--red); border: 1px solid var(--rule); border-radius: 3px; padding: 1px 5px; vertical-align: 1px; font-family: var(--cond); }
+/* legend swap */
+.bills-legend { display: none; }
+.cal-head.bills .tasks-legend, .cal-head.bills #balance-btn { display: none; }
+.cal-head.bills .bills-legend { display: flex; }
+.hl.bpaid { opacity: .65; text-decoration: line-through; }
+.hl.blate { border: 1.5px dashed var(--red); color: var(--maroon); font-weight: 800; }
+.hl.bdue { border-color: var(--red); color: var(--red); font-weight: 800; }
+.hl.dash { border-style: dashed; box-shadow: none; color: #555; }
+
+/* a bill chip on a day: logo · name · amount */
+.bchip { display: flex; align-items: center; gap: 5px; border: 1px solid var(--rule); border-radius: 3px; background: #fff; padding: 2px 5px; font-size: 12px; line-height: 1.2; box-shadow: var(--chip-shadow); margin: 1px 0; cursor: pointer; max-width: 100%; min-height: 21px; }
+.bchip:hover { box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px var(--rule), 2px 2px 0 rgba(0,0,0,.3); z-index: 4; position: relative; }
+.bchip .logo, .brow .logo, .pr .logo { width: 15px; height: 15px; border-radius: 3px; flex: none; object-fit: contain; background: #fff; border: 1px solid #ddd; }
+.ini { width: 15px; height: 15px; border-radius: 3px; flex: none; background: var(--tan); border: 1px solid var(--rule); font-size: 8px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; font-family: var(--cond); color: var(--ink); }
+.ini.big, .logo.big { width: 30px; height: 30px; font-size: 11px; border-radius: 5px; }
+.bchip .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bchip .amt { font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bchip .tag { font-size: 9px; font-weight: 900; letter-spacing: 1px; padding: 1px 4px; border-radius: 2px; border: 1px solid var(--rule); font-family: var(--cond); }
+.bchip.st-late { border: 1.5px dashed var(--red); }
+.bchip.st-late .tag { background: var(--red); color: #fff; border-color: var(--red); }
+.bchip.st-today { border: 1.5px solid var(--red); }
+.bchip.st-today .tag { background: #fff; color: var(--red); border-color: var(--red); }
+.bchip.st-paid { opacity: .6; box-shadow: none; }
+.bchip.st-paid .nm { text-decoration: line-through; }
+.bchip .ok { color: #3c5a1e; font-weight: 900; }
+.day .num .count.money { color: var(--ink); font-weight: 800; font-size: 11px; font-variant-numeric: tabular-nums; }
+.day .num .count.money.late { color: var(--red); }
+.day.bills.past .bchip { opacity: .75; }
+.day.bills.past .bchip.st-late { opacity: 1; }
+
+/* panel: month tally (same bones as Quick look) */
+.bq { padding: 6px 12px 4px; }
+.bq .top { display: flex; align-items: baseline; gap: 10px; }
+.bq .huge { font-weight: 900; font-size: 44px; line-height: .9; letter-spacing: -2px; }
+.bq .of { font-size: 13px; color: var(--ink-2); font-weight: 600; }
+.bq .lbl { font-size: 10px; letter-spacing: 1.4px; font-family: var(--cond); font-weight: 700; color: var(--maroon); margin-top: 4px; }
+.bq .bar { height: 10px; border: 1px solid var(--rule); border-radius: 5px; margin-top: 8px; background: #fff; position: relative; overflow: hidden; }
+.bq .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--olive-2); border-right: 2px solid var(--rule); }
+.bq .barlab { display: flex; justify-content: space-between; font-size: 9px; letter-spacing: 1px; color: #555; margin-top: 3px; font-family: var(--cond); }
+.bq .strip { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 8px; }
+.bq .box { border: 1px solid var(--rule); border-radius: 5px; padding: 5px 4px; text-align: center; background: #fff; box-shadow: var(--shadow); }
+.bq .box b { display: block; font-size: 18px; font-weight: 900; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bq .box small { display: block; font-size: 9px; letter-spacing: 1px; color: #555; margin-top: 3px; font-family: var(--cond); text-transform: uppercase; white-space: nowrap; }
+.bq .box.late { border: 1.5px dashed var(--red); }
+.bq .box.late b { color: var(--maroon); }
+.sec.bq-card { position: sticky; top: 0; z-index: 5; margin-top: 2px; box-shadow: 1px 1px 0 rgba(0,0,0,.18), 0 6px 8px -6px rgba(0,0,0,.25); }
+.sec.bq-card .lab small { color: #fff; opacity: .9; }
+.sec.late .lab { background: #fff; color: var(--maroon); border: 1.5px dashed var(--red); border-width: 0 0 1.5px; }
+.sec.late { border: 1.5px dashed var(--red); }
+/* bill rows in the panel */
+.brow { display: flex; align-items: center; gap: 8px; margin: 0 12px; padding: 5px 0; border-bottom: 1px dotted #999; font-size: 13px; cursor: pointer; }
+.brow:last-child { border-bottom: 0; }
+.brow:hover { background: #f6f1e6; }
+.brow .logo, .brow .ini { width: 22px; height: 22px; border-radius: 4px; font-size: 9px; }
+.brow .tt { flex: 1; min-width: 0; overflow: hidden; }
+.brow .tt b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brow .tt small { color: var(--ink-2); font-size: 11px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brow.st-late .tt small, .brow.st-today .tt small { color: var(--maroon); font-weight: 700; }
+.brow .amt { font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.brow.st-late .amt { color: var(--maroon); }
+.brow .btn.pay { background: var(--olive); font-weight: 800; padding: 4px 8px; font-size: 12px; }
+.brow.st-paid { opacity: .65; } .brow.st-paid .tt b { text-decoration: line-through; }
+.sec .acct { font-size: 12px; margin: 0 12px; padding: 4px 0; border-bottom: 1px dotted #999; display: flex; justify-content: space-between; gap: 8px; cursor: pointer; }
+.sec .acct:last-child { border-bottom: 0; }
+.sec .acct i { color: var(--ink-3); font-style: normal; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sec .acct.none b { color: var(--maroon); }
+.sec.actions-row { padding: 7px 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+.actions-col { display: flex; flex-direction: column; gap: 8px; margin: 6px 12px 4px; }
+.actions-col .btn { text-align: center; text-decoration: none; }
+.sec .row.bills-late b { color: var(--maroon); }
+
+/* the bill card (panel) */
+.item.bill { border-left-color: var(--rule); }
+.item.bill.st-late { border-left-color: var(--red); border-style: dashed; }
+.item.bill.st-today, .item.bill.st-soon { border-left-color: var(--red); }
+.item.bill.st-paid { border-left-color: #3c5a1e; opacity: .85; }
+.item.bill .head .bamt { font-weight: 900; font-size: 15px; font-variant-numeric: tabular-nums; }
+.item.bill .head .title { font-weight: 700; }
+.item .actions.r3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.item .actions.r3 .btn { white-space: nowrap; padding-left: 4px; padding-right: 4px; text-align: center; }
+.bphoto { margin-top: 8px; }
+.bphoto img { width: 100%; max-height: 220px; object-fit: cover; border: 1px solid var(--rule); border-radius: 6px; cursor: pointer; display: block; }
+.item .detail a { color: var(--blue); }
+
+/* hover summary on the $ Bills button */
+.pop.billpeek { width: 340px; padding: 8px 10px 8px; cursor: default; }
+.billpeek .ttl { font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+.billpeek .ttl b { color: var(--ink); font-size: 13px; }
+.billpeek .ph { font-size: 10px; letter-spacing: 1.2px; font-family: var(--cond); font-weight: 700; color: var(--ink-2); margin: 6px 0 2px; border-bottom: 1px solid var(--rule); padding-bottom: 2px; }
+.billpeek .ph.late { color: var(--maroon); border-bottom: 1.5px dashed var(--red); }
+.billpeek .pr { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 12px; cursor: pointer; border-bottom: 1px dotted #bbb; }
+.billpeek .pr:last-of-type { border-bottom: 0; }
+.billpeek .pr .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.billpeek .pr .wh { font-size: 11px; color: var(--ink-2); white-space: nowrap; }
+.billpeek .pr.st-late .wh, .billpeek .pr.st-today .wh { color: var(--maroon); font-weight: 700; }
+.billpeek .pr .amt { font-weight: 800; font-variant-numeric: tabular-nums; }
+.billpeek .pr .btn.pay { background: var(--olive); font-weight: 800; padding: 2px 7px; font-size: 11px; }
+.billpeek .empty { padding: 2px 0 4px; }
+.billpeek .hint { margin-top: 6px; }
+
+/* add / edit bill form */
+.bform { display: grid; gap: 8px; margin: 0 12px 6px; font-size: 13px; }
+.bform.two { grid-template-columns: 1fr 1fr; }
+.bf { display: grid; gap: 3px; color: var(--ink-2); font-size: 12px; }
+.bf input, .bf textarea { padding: 7px 8px; border: 1px solid var(--rule); border-radius: 5px; background: #fff; width: 100%; font-size: 14px; }
+.bf textarea { min-height: 56px; resize: vertical; }
+.bf.check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.bf.check input { width: auto; }
+.bf-lab { font-size: 12px; color: var(--ink-2); margin: 2px 12px 0; }
+.picks .o.dash { border-style: dashed; }
+.logo-preview { display: flex; align-items: center; gap: 8px; min-height: 30px; }
+.photo-row { display: flex; flex-direction: column; gap: 6px; }
+
+/* phone */
+@media (max-width: 740px), ((pointer: coarse) and (max-height: 520px)) {
+  #bucket-seg button[data-bucket="bills"] { display: none; }   /* phone: the Bills tab at the bottom instead */
+  .tabs { grid-template-columns: repeat(5, 1fr); }
+  .bq .huge { font-size: 48px; }
+  .brow { font-size: 15px; padding: 8px 0; }
+  .brow .tt small { font-size: 13px; }
+  .brow .btn.pay { font-size: 14px; padding: 7px 10px; }
+  .bform.two { grid-template-columns: 1fr; }
+  .bf input, .bf textarea { font-size: 16px; padding: 9px 10px; }
+  .item .actions.r3 { grid-template-columns: 1fr 1fr; }
+  .sec.bq-card { position: static; }
+}

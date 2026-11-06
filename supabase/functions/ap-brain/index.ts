@@ -80,6 +80,32 @@ const TOOLS: Anthropic.Tool[] = [
   },
   { name: "complete_task", description: "Mark a task done.", input_schema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] } },
   { name: "delete_task", description: "Remove a task to the Trash (it can be put back for 30 days). ONLY when Adam explicitly says delete/remove, or to remove an exact duplicate.", input_schema: { type: "object", properties: { id: { type: "number" } }, required: ["id"] } },
+  // ---- bills (the ledger: fm_bills · fm_bill_payments · fm_accounts) ----
+  {
+    name: "list_bills",
+    description: "Adam's bills: everything past due (unpaid, up to 75 days back), everything due in the next 14 days, and this month's totals (left to pay / paid). Call this before answering anything about bills or money due, and before mark_bill_paid so you use the right bill id and due date.",
+    input_schema: { type: "object", properties: { month: { type: "string", description: "YYYY-MM to summarize (default: this month)" } } },
+  },
+  {
+    name: "mark_bill_paid",
+    description: "Mark ONE bill occurrence paid — only when Adam himself says he paid it (\"I paid PSE\", \"the mortgage went through\"). Never on your own. Give bill_id (from list_bills) and the due_date of the occurrence (default: the most recent unpaid one on or before today+7).",
+    input_schema: { type: "object", properties: { bill_id: { type: "number" }, due_date: { type: "string", description: "YYYY-MM-DD of the occurrence" }, note: { type: "string" } }, required: ["bill_id"] },
+  },
+  {
+    name: "unmark_bill_paid",
+    description: "Undo a paid mark when Adam says it was wrong (\"I didn't actually pay Comcast\").",
+    input_schema: { type: "object", properties: { bill_id: { type: "number" }, due_date: { type: "string" } }, required: ["bill_id", "due_date"] },
+  },
+  {
+    name: "add_bill",
+    description: "Add a new recurring bill when Adam says he has a new one. Needs name, amount and the first/next due date. recur: monthly (default) | biweekly | yearly | once.",
+    input_schema: { type: "object", properties: { name: { type: "string" }, amount: { type: "number" }, anchor_date: { type: "string", description: "YYYY-MM-DD a due date it falls on" }, recur: { type: "string", enum: ["monthly", "biweekly", "yearly", "once"] }, domain: { type: "string", description: "company website for the logo, e.g. pse.com" }, remind_days: { type: "number" }, autopay: { type: "boolean" }, account: { type: "string", description: "bank / nickname / last digits of the account it pays from, matched against his accounts" }, notes: { type: "string" } }, required: ["name", "amount", "anchor_date"] },
+  },
+  {
+    name: "update_bill",
+    description: "Change a bill (new amount, new due day, ended — pass ended_on as the last due date — autopay, account). Only the fields that change.",
+    input_schema: { type: "object", properties: { id: { type: "number" }, name: { type: "string" }, amount: { type: "number" }, anchor_date: { type: "string" }, recur: { type: "string", enum: ["monthly", "biweekly", "yearly", "once"] }, domain: { type: "string" }, remind_days: { type: "number" }, autopay: { type: "boolean" }, account: { type: "string" }, notes: { type: "string" }, ended_on: { type: "string", description: "YYYY-MM-DD last due date it applies to; null = ongoing" } }, required: ["id"] },
+  },
   {
     name: "ask_adam",
     description: "Stop and ask Adam 1 to 3 short multiple-choice questions you truly need answered before you can file or schedule correctly (a missing deadline, which job, whether something can slip). Do NOT ask about things you can decide with the rules. After calling this, stop; Adam's answers come back as the next message.",
@@ -115,8 +141,120 @@ function cleanPatch(input: Record<string, unknown>): Record<string, unknown> {
   return p;
 }
 
+/* ---------------- bills: occurrences are computed, never stored (mirror of js/bills.js) ---------------- */
+type Bill = { id: number; name: string; domain: string | null; amount: number; recur: string; anchor_date: string; account_id: number | null; remind_days: number; autopay: boolean; notes: string | null; ended_on: string | null };
+type Pay = { id: number; bill_id: number; due_date: string; paid_at: string; source: string; note: string | null };
+type Acct = { id: number; bank: string; nick: string | null; last4: string | null };
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const isoDate = (d: Date) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+const dateOf = (s: string) => new Date(s + "T12:00:00Z");
+const addDaysISO = (s: string, n: number) => isoDate(new Date(dateOf(s).getTime() + n * 86400000));
+const daysInMonth = (y: number, m: number) => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+function dueDatesInMonth(b: Bill, y: number, m: number): string[] {
+  const a = dateOf(b.anchor_date), out: string[] = [];
+  if (b.recur === "monthly") out.push(`${y}-${pad2(m + 1)}-${pad2(Math.min(a.getUTCDate(), daysInMonth(y, m)))}`);
+  else if (b.recur === "yearly") { if (a.getUTCMonth() === m) out.push(`${y}-${pad2(m + 1)}-${pad2(Math.min(a.getUTCDate(), daysInMonth(y, m)))}`); }
+  else if (b.recur === "once") { if (a.getUTCFullYear() === y && a.getUTCMonth() === m) out.push(b.anchor_date); }
+  else if (b.recur === "biweekly") { const n = daysInMonth(y, m); for (let d = 1; d <= n; d++) { const dt = Date.UTC(y, m, d, 12); const diff = Math.round((dt - a.getTime()) / 86400000); if (diff >= 0 && diff % 14 === 0) out.push(`${y}-${pad2(m + 1)}-${pad2(d)}`); } }
+  return out.filter((d) => d >= b.anchor_date && (!b.ended_on || d <= b.ended_on));
+}
+function occurrencesBetween(bills: Bill[], from: string, to: string): { bill: Bill; due: string }[] {
+  const out: { bill: Bill; due: string }[] = [];
+  const f = dateOf(from), t = dateOf(to);
+  for (let y = f.getUTCFullYear(), m = f.getUTCMonth(); y < t.getUTCFullYear() || (y === t.getUTCFullYear() && m <= t.getUTCMonth()); m === 11 ? (y++, m = 0) : m++) {
+    for (const b of bills) for (const due of dueDatesInMonth(b, y, m)) if (due >= from && due <= to) out.push({ bill: b, due });
+  }
+  return out.sort((p, q) => p.due.localeCompare(q.due));
+}
+const money = (n: number) => "$" + (Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+async function loadLedger(db: DB) {
+  const [b, p, a] = await Promise.all([
+    db.from("fm_bills").select("id,name,domain,amount,recur,anchor_date,account_id,remind_days,autopay,notes,ended_on").is("deleted_at", null).order("sort"),
+    db.from("fm_bill_payments").select("id,bill_id,due_date,paid_at,source,note").gte("due_date", addDaysISO(new Date().toISOString().slice(0, 10), -120)),
+    db.from("fm_accounts").select("id,bank,nick,last4"),
+  ]);
+  if (b.error) throw new Error(b.error.message);
+  const bills = (b.data || []).map((x: Bill) => ({ ...x, amount: Number(x.amount) })) as Bill[];
+  return { bills, pays: (p.data || []) as Pay[], accts: (a.data || []) as Acct[] };
+}
+const acctLabel = (accts: Acct[], id: number | null) => { const a = accts.find((x) => x.id === id); return a ? `${a.bank}${a.nick ? " · " + a.nick : ""}${a.last4 ? " ••" + String(a.last4).slice(-4) : ""}` : null; };
+function matchAccount(accts: Acct[], text?: string): number | null {
+  if (!text) return null;
+  const t = text.toLowerCase();
+  const hit = accts.find((a) => `${a.bank} ${a.nick || ""} ${a.last4 || ""}`.toLowerCase().includes(t)) || accts.find((a) => t.includes(String(a.last4 || "").slice(-4)) && a.last4);
+  return hit ? hit.id : null;
+}
+
 // deno-lint-ignore no-explicit-any
 async function runTool(db: DB, name: string, input: any, today: string, batch: string, actions: Action[]): Promise<string> {
+  if (name === "list_bills") {
+    const { bills, pays, accts } = await loadLedger(db);
+    const paid = (b: Bill, due: string) => pays.find((p) => p.bill_id === b.id && p.due_date === due);
+    const ym = /^\d{4}-\d{2}$/.test(String(input?.month || "")) ? String(input.month) : today.slice(0, 7);
+    const [y, m] = ym.split("-").map(Number);
+    const monthOcc = occurrencesBetween(bills, `${ym}-01`, `${ym}-${pad2(daysInMonth(y, m - 1))}`);
+    const total = monthOcc.reduce((s, o) => s + o.bill.amount, 0), paidSum = monthOcc.filter((o) => paid(o.bill, o.due)).reduce((s, o) => s + o.bill.amount, 0);
+    const late = occurrencesBetween(bills, addDaysISO(today, -75), addDaysISO(today, -1)).filter((o) => !paid(o.bill, o.due));
+    const soon = occurrencesBetween(bills, today, addDaysISO(today, 14)).filter((o) => !paid(o.bill, o.due));
+    const line = (o: { bill: Bill; due: string }) => `#${o.bill.id} ${o.bill.name} ${money(o.bill.amount)} due ${o.due}${o.bill.autopay ? " (autopay)" : ""}${acctLabel(accts, o.bill.account_id) ? " from " + acctLabel(accts, o.bill.account_id) : ""}`;
+    const out = [`MONTH ${ym}: ${money(total - paidSum)} left of ${money(total)} · ${monthOcc.filter((o) => paid(o.bill, o.due)).length} of ${monthOcc.length} paid`];
+    out.push(late.length ? `PAST DUE (${late.length}, ${money(late.reduce((s, o) => s + o.bill.amount, 0))}): ` + late.map((o) => line(o) + ` — ${Math.round((dateOf(today).getTime() - dateOf(o.due).getTime()) / 86400000)} days late`).join("; ") : "PAST DUE: none");
+    out.push(soon.length ? `DUE NEXT 14 DAYS: ` + soon.map(line).join("; ") : "DUE NEXT 14 DAYS: none");
+    out.push(`ALL BILLS: ` + bills.map((b) => `#${b.id} ${b.name} ${money(b.amount)} ${b.recur} (day ${Number(b.anchor_date.slice(8, 10))})`).join("; "));
+    return out.join("\n");
+  }
+  if (name === "mark_bill_paid" || name === "unmark_bill_paid") {
+    const { bills, pays } = await loadLedger(db);
+    const bill = bills.find((b) => b.id === Number(input?.bill_id));
+    if (!bill) return "ERROR: no bill with that id — call list_bills";
+    let due = /^\d{4}-\d{2}-\d{2}$/.test(String(input?.due_date || "")) ? String(input.due_date) : "";
+    if (!due) {
+      const cands = occurrencesBetween([bill], addDaysISO(today, -75), addDaysISO(today, 7)).filter((o) => !pays.some((p) => p.bill_id === bill.id && p.due_date === o.due));
+      if (!cands.length) return `Nothing unpaid for ${bill.name} between 75 days ago and next week.`;
+      due = cands[cands.length - 1].due;
+    }
+    const existing = pays.find((p) => p.bill_id === bill.id && p.due_date === due);
+    if (name === "mark_bill_paid") {
+      if (existing) return `${bill.name} due ${due} is already marked paid.`;
+      const { data, error } = await db.from("fm_bill_payments").insert({ bill_id: bill.id, due_date: due, source: "brain", note: input?.note ? String(input.note).slice(0, 200) : null }).select().single();
+      if (error) return "ERROR: " + error.message;
+      await db.from("fm_moves").insert({ batch_id: batch, kind: "bill_paid", task_id: null, before: { bill_id: bill.id, name: bill.name, due_date: due, paid: false }, after: { ...data, name: bill.name }, reason: "Adam said he paid it" });
+      actions.push({ kind: "bill_paid", id: bill.id, title: `${bill.name} ${money(bill.amount)} (due ${due})` });
+      return `Marked paid: ${bill.name} ${money(bill.amount)} due ${due}.`;
+    }
+    if (!existing) return `${bill.name} due ${due} was not marked paid.`;
+    const { error } = await db.from("fm_bill_payments").delete().eq("id", existing.id);
+    if (error) return "ERROR: " + error.message;
+    await db.from("fm_moves").insert({ batch_id: batch, kind: "bill_unpaid", task_id: null, before: { ...existing, name: bill.name }, after: { bill_id: bill.id, name: bill.name, due_date: due, paid: false }, reason: "Adam said it was not paid" });
+    actions.push({ kind: "bill_unpaid", id: bill.id, title: `${bill.name} (due ${due})` });
+    return `Un-marked: ${bill.name} due ${due} is unpaid again.`;
+  }
+  if (name === "add_bill" || name === "update_bill") {
+    const { bills, accts } = await loadLedger(db);
+    const row: Record<string, unknown> = {};
+    for (const k of ["name", "amount", "anchor_date", "recur", "domain", "remind_days", "autopay", "notes", "ended_on"]) if (input?.[k] !== undefined && input[k] !== null) row[k] = input[k];
+    if ("account" in (input || {})) row.account_id = matchAccount(accts, input.account);
+    if (typeof row.domain === "string") row.domain = String(row.domain).replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/.*$/, "").toLowerCase() || null;
+    if (row.anchor_date && !/^\d{4}-\d{2}-\d{2}$/.test(String(row.anchor_date))) return "ERROR: anchor_date must be YYYY-MM-DD";
+    if (name === "add_bill") {
+      if (!(Number(row.amount) > 0)) return "ERROR: amount must be > 0";
+      row.recur ??= "monthly"; row.remind_days ??= 2; row.sort = Number(String(row.anchor_date).slice(8, 10));
+      const { data, error } = await db.from("fm_bills").insert(row).select("id,name,amount,anchor_date,recur").single();
+      if (error) return "ERROR: " + error.message;
+      await db.from("fm_moves").insert({ batch_id: batch, kind: "bill_add", task_id: null, before: null, after: data, reason: "Adam said he has a new bill" });
+      actions.push({ kind: "bill_add", id: data.id, title: `${data.name} ${money(Number(data.amount))} ${data.recur}` });
+      return "Added bill: " + JSON.stringify(data);
+    }
+    const bill = bills.find((b) => b.id === Number(input?.id));
+    if (!bill) return "ERROR: no bill with that id — call list_bills";
+    if (!Object.keys(row).length) return "ERROR: nothing to change";
+    const before: Record<string, unknown> = {}; for (const k of Object.keys(row)) before[k] = (bill as Record<string, unknown>)[k] ?? null;
+    const { data, error } = await db.from("fm_bills").update(row).eq("id", bill.id).select("id,name,amount,anchor_date,recur,ended_on,autopay,account_id").single();
+    if (error) return "ERROR: " + error.message;
+    await db.from("fm_moves").insert({ batch_id: batch, kind: "bill_update", task_id: null, before: { id: bill.id, name: bill.name, ...before }, after: { id: bill.id, ...row }, reason: String(input?.reason || "Adam changed a bill") });
+    actions.push({ kind: "bill_update", id: bill.id, title: bill.name });
+    return "Updated bill: " + JSON.stringify(data);
+  }
   if (name === "list_jobs") {
     const { data, error } = await db.from("fm_jobs").select("name,bucket").eq("active", true).order("bucket").order("sort");
     return error ? "ERROR: " + error.message : JSON.stringify(data);
@@ -233,7 +371,8 @@ RULES
 9. Brain dumps: split into separate tasks. Dates like "end of week" = Friday; "next week" = the following Monday unless he says a day.
 10. Sizes and priorities you guess stay confirmed=false (the app shows a "?" badge). Set confirmed=true only when Adam himself states the size and the priority. When a day is over 8h and tasks on it are still guesses, ask him for their size/priority in ONE short ask_adam question before moving things.
 11. "Balance this week" means: apply rules 3-5 to Mon-Fri of that week — low first, then normal, toward their targets; never past a drop-dead; never a promised item; urgent stays. Every move gets a one-line reason.
-12. Be plain and short. Your final reply is read on screen: 2-5 lines, what you filed and what you moved and why. No markdown headers, no fluff.`;
+12. Be plain and short. Your final reply is read on screen: 2-5 lines, what you filed and what you moved and why. No markdown headers, no fluff.
+13. BILLS live in the bill ledger, not in tasks: never add_task for a bill. "I paid X" / "X went through" → list_bills, then mark_bill_paid for that bill (the occurrence he means; default the latest unpaid). "I didn't pay X" → unmark_bill_paid. A new bill → add_bill (ask for the amount or due date only if he gave neither). Any question about bills, money due or past due → list_bills and answer from it. A bill is paid ONLY when Adam says so — never mark one paid because a date passed or an alert fired. Past-due bills are the first thing to mention when he asks how he is doing.`;
 }
 
 Deno.serve(async (req) => {

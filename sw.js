@@ -1,6 +1,6 @@
 // AP Personal Assistant service worker — network-first for app files, so updates land fast.
-const VERSION = "ap-v48";
-const SHELL = ["./", "./index.html", "./css/app.css", "./js/app.js", "./js/auth.js", "./js/config.js", "./js/supabase.js", "./manifest.webmanifest", "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png"];
+const VERSION = "ap-v49";
+const SHELL = ["./", "./index.html", "./css/app.css", "./js/app.js", "./js/auth.js", "./js/config.js", "./js/supabase.js", "./js/bills.js", "./manifest.webmanifest", "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
