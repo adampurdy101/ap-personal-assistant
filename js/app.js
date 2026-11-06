@@ -926,6 +926,8 @@ async function undoLastBatch() {
     else if (m.kind === "bill_unpaid" && m.before?.bill_id) await db.from("fm_bill_payments").insert({ bill_id: m.before.bill_id, due_date: m.before.due_date, source: m.before.source || "brain", note: m.before.note || null });
     else if (m.kind === "bill_add" && m.after?.id) await db.from("fm_bills").update({ deleted_at: stamp }).eq("id", m.after.id);
     else if (m.kind === "bill_update" && m.before?.id) { const b = { ...m.before }; delete b.id; delete b.name; await db.from("fm_bills").update(b).eq("id", m.before.id); }
+    else if (m.kind === "off_add" && m.after?.id) await db.from("fm_meetings").delete().eq("id", m.after.id).eq("source", "pto");   // the day is a work day again
+    else if (m.kind === "off_remove" && m.before?.day) await db.from("fm_meetings").insert({ source: "pto", ext_key: "pto-" + m.before.day, title: m.before.title || "PTO — day off", day: m.before.day, start_at: m.before.day + "T00:00:00Z", end_at: iso(addDays(fromISO(m.before.day), 1)) + "T00:00:00Z", all_day: true, attending: false });   // hatched again
   }
   await db.from("fm_moves").delete().eq("batch_id", brain.lastBatch);
   brain.log.push({ who: "ap", text: `Undid ${moves.length} change${moves.length === 1 ? "" : "s"}.` });
@@ -956,6 +958,8 @@ function renderBrainPanel(r) {
         else if (a.kind === "bill_unpaid") line = `Un-paid: ${a.title}`;
         else if (a.kind === "bill_add") line = `New bill: ${a.title}`;
         else if (a.kind === "bill_update") line = `Changed bill: ${a.title}`;
+        else if (a.kind === "off_add") line = `Day off: ${a.to ? fmtShort(a.to) : ""} — ${a.title} (hatched on the calendar)`;
+        else if (a.kind === "off_remove") line = `Work day again: ${a.from ? fmtShort(a.from) : ""} (was ${a.title})`;
         ul.append(el("li", "", line));
       });
       b.append(ul);

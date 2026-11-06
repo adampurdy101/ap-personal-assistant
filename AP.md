@@ -136,7 +136,10 @@ and "why did this move" both have an answer. App batches are `app-<date>`.
 - Source `pci_outlook`: the owner's published Outlook calendar (ICS). The link is stored in `fm_settings`, never in this repo.
   `ap-meetings` expands recurrences (ical.js, the feed's own VTIMEZONEs), keeps 14 days back / 90 ahead,
   upserts by `source + ext_key`, and deletes `pci_outlook` rows in the window that left the feed. Titles and times only.
-- Sources `pcg_holiday` and `pto`: one all-day row per day off (`ext_key` = `pcg-YYYY-MM-DD` / `pto-YYYY-MM-DD`). Written by Claude, never by the sync.
+- Sources `pcg_holiday` and `pto`: one all-day row per day off (`ext_key` = `pcg-YYYY-MM-DD` / `pto-YYYY-MM-DD`). Written by Claude or by the
+  brain (v5, Nov 6 2026: `add_day_off` / `remove_day_off` — "I'm taking Monday off" hatches the day the moment the row lands; the app
+  subscribes to `fm_meetings` changes). Never by the sync. RLS: the owner may insert/delete only `pto` / `pcg_holiday` all-day rows
+  (migration `fm_meetings_owner_days_off`); `pci_outlook` rows stay sync-only. Undo (`off_add` / `off_remove` in `fm_moves`) puts the row back or removes it.
 - `attending` comes from `fm_meeting_rules` (title contains). The app's "I go to this" / "I don't go" buttons write that rule for the whole series.
 - App: ■ solid = you go (counts against the 8 h day) · ◌ dashed = invited (not counted) · ◇ = all day / holiday / off.
 
@@ -144,8 +147,10 @@ and "why did this move" both have an answer. App batches are `app-<date>`.
 `list_jobs`, `list_tasks`, `day_load` (tasks + attended meetings per day, OFF days, guessed items),
 `add_task`, `update_task` (moves need a reason; refuses promised items and past-drop-dead),
 `complete_task`, `delete_task` (soft: sets `deleted_at`), `ask_adam` (max 3 A/B/C questions, then stop),
-and for bills `list_bills` (past due first), `mark_bill_paid`, `unmark_bill_paid`, `add_bill`, `update_bill` — a bill is
-never a task, and the brain marks one paid only when the owner says so. Every read skips `deleted_at` rows. Model from the
+for bills `list_bills` (past due first), `mark_bill_paid`, `unmark_bill_paid`, `add_bill`, `update_bill` — a bill is
+never a task, and the brain marks one paid only when the owner says so — and for days off `add_day_off` (a day or a run; skips weekends
+and days already off; lists work tasks sitting on them so the brain moves them) and `remove_day_off` (PTO only; company holidays stay).
+A day off is never a task either. Every read skips `deleted_at` rows. Model from the
 `AP_MODEL` secret (default `claude-sonnet-4-5`). Anthropic key in Supabase Edge Function secrets only.
 
 ## Quick-add grammar
@@ -167,5 +172,5 @@ fresh dump of the seed on any later day keeps the checks green. Needs `pip insta
 1. Calendar, panel, quick add + mic, Add task, brain, undo — done
 2. Scheduled runs (morning, end of day) — done
 3. Meetings on the calendar (Outlook feed direct, every 15 min) — done · days off — done
-4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint + PTO stripe color options
+4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint + PTO stripe color options
 5. Phone-first polish

@@ -3,6 +3,8 @@
 // question, answers to earlier questions). This calls Claude with tools that
 // read/write the fm_tasks table AS THE LOGGED-IN USER (his JWT + anon key, RLS
 // applies), files everything, reshuffles within the rules, and returns what it did.
+// v5 (Nov 6, 2026): days off by voice — add_day_off / remove_day_off write all-day
+// PTO rows to fm_meetings (source pto); the app hatches those days on its own.
 //
 // SECURITY: ANTHROPIC_API_KEY lives only in Supabase Edge Function secrets.
 import Anthropic from "npm:@anthropic-ai/sdk";
@@ -106,6 +108,17 @@ const TOOLS: Anthropic.Tool[] = [
     description: "Change a bill (new amount, new due day, ended — pass ended_on as the last due date — autopay, account). Only the fields that change.",
     input_schema: { type: "object", properties: { id: { type: "number" }, name: { type: "string" }, amount: { type: "number" }, anchor_date: { type: "string" }, recur: { type: "string", enum: ["monthly", "biweekly", "yearly", "once"] }, domain: { type: "string" }, remind_days: { type: "number" }, autopay: { type: "boolean" }, account: { type: "string" }, notes: { type: "string" }, ended_on: { type: "string", description: "YYYY-MM-DD last due date it applies to; null = ongoing" } }, required: ["id"] },
   },
+  // ---- days off (all-day PTO rows in fm_meetings; the app hatches the day the moment the row lands) ----
+  {
+    name: "add_day_off",
+    description: "Mark one day or a run of days as PTO / a day off (\"I'm taking Monday off\", \"PTO on the 9th\", \"out Friday\", \"sick today\", \"vacation Dec 14-18\"). NEVER add_task for a day off. Weekends are skipped (already off); days already off are left alone. After this, use day_load and move any WORK task off those days with update_task (one-line reason each).",
+    input_schema: { type: "object", properties: { from: { type: "string", description: "YYYY-MM-DD first day off" }, to: { type: "string", description: "YYYY-MM-DD last day off (default = from)" }, title: { type: "string", description: "Short label shown on the day, e.g. 'PTO — Mom's estate sale' or 'Sick day'. Default 'PTO — day off'." } }, required: ["from"] },
+  },
+  {
+    name: "remove_day_off",
+    description: "Un-mark a PTO day when Adam says he is working it after all (\"cancel my PTO Friday\", \"I'm not taking the 9th off\"). Company holidays cannot be removed.",
+    input_schema: { type: "object", properties: { date: { type: "string", description: "YYYY-MM-DD" } }, required: ["date"] },
+  },
   {
     name: "ask_adam",
     description: "Stop and ask Adam 1 to 3 short multiple-choice questions you truly need answered before you can file or schedule correctly (a missing deadline, which job, whether something can slip). Do NOT ask about things you can decide with the rules. After calling this, stop; Adam's answers come back as the next message.",
@@ -185,8 +198,56 @@ function matchAccount(accts: Acct[], text?: string): number | null {
   return hit ? hit.id : null;
 }
 
+/* ---------------- days off: all-day rows in fm_meetings (source pto), ext_key pto-<date> ---------------- */
+const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
+const dayName = (iso: string) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dateOf(iso).getUTCDay()];
+async function addDaysOff(db: DB, uid: string, input: { from?: string; to?: string; title?: string }, batch: string, actions: Action[]): Promise<string> {
+  const from = String(input?.from || "");
+  const to = String(input?.to || from);
+  if (!ISO_RE.test(from) || !ISO_RE.test(to)) return "ERROR: from/to must be YYYY-MM-DD";
+  if (to < from) return "ERROR: to is before from";
+  if ((dateOf(to).getTime() - dateOf(from).getTime()) / 86400000 > 31) return "ERROR: more than 31 days — split it up or check the dates";
+  const title = (String(input?.title || "").trim() || "PTO — day off").slice(0, 80);
+  const { data: existing } = await db.from("fm_meetings").select("day,title,source").gte("day", from).lte("day", to).eq("all_day", true).in("source", OFF_SOURCES);
+  const already = new Map<string, string>((existing || []).map((m: { day: string; title: string }) => [m.day, m.title] as [string, string]));
+  const added: string[] = [], skipped: string[] = [];
+  for (let d = from; d <= to; d = addDaysISO(d, 1)) {
+    const dow = dateOf(d).getUTCDay();
+    if (dow === 0 || dow === 6) continue; // weekends are already off
+    if (already.has(d)) { skipped.push(`${d} ${dayName(d)} already off (${already.get(d)})`); continue; }
+    const row = { user_id: uid, source: "pto", ext_key: `pto-${d}`, title, day: d, start_at: `${d}T00:00:00Z`, end_at: `${addDaysISO(d, 1)}T00:00:00Z`, all_day: true, attending: false };
+    const { data, error } = await db.from("fm_meetings").insert(row).select("id,day,title,source").single();
+    if (error) return `ERROR on ${d}: ${error.message}${added.length ? ` (already marked: ${added.join(", ")})` : ""}`;
+    await db.from("fm_moves").insert({ batch_id: batch, kind: "off_add", task_id: null, before: null, after: data, reason: "Adam said he is off this day", to_date: d });
+    actions.push({ kind: "off_add", id: data.id, title, to: d });
+    added.push(`${d} ${dayName(d)}`);
+  }
+  // what is sitting on those days — the model moves work off them
+  const { data: sitting } = await db.from("fm_tasks").select("id,title,scheduled_date,size,bucket").is("deleted_at", null).neq("status", "done").gte("scheduled_date", from).lte("scheduled_date", to);
+  const work = (sitting || []).filter((t: { bucket: string }) => t.bucket === "work");
+  const out = [added.length ? `Marked off (hatched in the app): ${added.join(", ")} — "${title}".` : "Nothing new to mark — those days were already off."];
+  if (skipped.length) out.push("Skipped: " + skipped.join("; "));
+  if (work.length) out.push(`WORK tasks sitting on a day off — move each one with update_task (not past a drop-dead, not promised items): ` + work.map((t: { id: number; title: string; scheduled_date: string; size: string }) => `#${t.id} ${t.title} (${t.size}, on ${t.scheduled_date})`).join("; "));
+  else out.push("No work tasks on those days.");
+  return out.join("\n");
+}
+async function removeDayOff(db: DB, input: { date?: string }, batch: string, actions: Action[]): Promise<string> {
+  const d = String(input?.date || "");
+  if (!ISO_RE.test(d)) return "ERROR: date must be YYYY-MM-DD";
+  const { data: rows } = await db.from("fm_meetings").select("id,day,title,source").eq("day", d).eq("all_day", true).in("source", OFF_SOURCES);
+  const pto = (rows || []).find((m: { source: string }) => m.source === "pto");
+  if (!pto) return (rows || []).length ? `${d} is a company holiday (${rows![0].title}) — that cannot be removed.` : `${d} was not marked as a day off.`;
+  const { error } = await db.from("fm_meetings").delete().eq("id", pto.id);
+  if (error) return "ERROR: " + error.message;
+  await db.from("fm_moves").insert({ batch_id: batch, kind: "off_remove", task_id: null, before: pto, after: null, reason: "Adam said he is working this day after all", from_date: d });
+  actions.push({ kind: "off_remove", id: pto.id, title: pto.title, from: d });
+  return `${d} ${dayName(d)} is a work day again (was "${pto.title}").`;
+}
+
 // deno-lint-ignore no-explicit-any
-async function runTool(db: DB, name: string, input: any, today: string, batch: string, actions: Action[]): Promise<string> {
+async function runTool(db: DB, uid: string, name: string, input: any, today: string, batch: string, actions: Action[]): Promise<string> {
+  if (name === "add_day_off") return addDaysOff(db, uid, input, batch, actions);
+  if (name === "remove_day_off") return removeDayOff(db, input, batch, actions);
   if (name === "list_bills") {
     const { bills, pays, accts } = await loadLedger(db);
     const paid = (b: Bill, due: string) => pays.find((p) => p.bill_id === b.id && p.due_date === due);
@@ -372,7 +433,9 @@ RULES
 10. Sizes and priorities you guess stay confirmed=false (the app shows a "?" badge). Set confirmed=true only when Adam himself states the size and the priority. When a day is over 8h and tasks on it are still guesses, ask him for their size/priority in ONE short ask_adam question before moving things.
 11. "Balance this week" means: apply rules 3-5 to Mon-Fri of that week — low first, then normal, toward their targets; never past a drop-dead; never a promised item; urgent stays. Every move gets a one-line reason.
 12. Be plain and short. Your final reply is read on screen: 2-5 lines, what you filed and what you moved and why. No markdown headers, no fluff.
-13. BILLS live in the bill ledger, not in tasks: never add_task for a bill. "I paid X" / "X went through" → list_bills, then mark_bill_paid for that bill (the occurrence he means; default the latest unpaid). "I didn't pay X" → unmark_bill_paid. A new bill → add_bill (ask for the amount or due date only if he gave neither). Any question about bills, money due or past due → list_bills and answer from it. A bill is paid ONLY when Adam says so — never mark one paid because a date passed or an alert fired. Past-due bills are the first thing to mention when he asks how he is doing.`;
+13. BILLS live in the bill ledger, not in tasks: never add_task for a bill. "I paid X" / "X went through" → list_bills, then mark_bill_paid for that bill (the occurrence he means; default the latest unpaid). "I didn't pay X" → unmark_bill_paid. A new bill → add_bill (ask for the amount or due date only if he gave neither). Any question about bills, money due or past due → list_bills and answer from it. A bill is paid ONLY when Adam says so — never mark one paid because a date passed or an alert fired. Past-due bills are the first thing to mention when he asks how he is doing.
+14. DAYS OFF are never tasks. "I'm taking Monday off", "PTO on the 9th", "out Friday", "sick today", "vacation Dec 14-18", "mark the 9th as PTO" → add_day_off (never add_task). The app hatches that day the moment the row lands, exactly like the Japan trip and the company holidays, and the day drops to 0 hours. Then day_load for those days and move every WORK task off them with update_task, one-line reason each (home items can stay). "I'm working the 9th after all" / "cancel my PTO Friday" → remove_day_off. Company holidays cannot be removed. If a day off already exists as a task, remove_day_off is not needed — delete_task that task and add_day_off instead.
+15. WHAT YOU CONTROL: everything the calendar draws from — tasks, days off, bills, which meetings count. Hatched day = a day-off row; chip = a task; "?" = a guessed size. You do not pick colors or layout; if Adam asks for a look change, say that is done in a Claude chat and carry on with the filing. Never tell him to report something to "the app developer" — he and Claude are the developers. If you cannot do something, say exactly what in one line.`;
 }
 
 Deno.serve(async (req) => {
@@ -421,7 +484,7 @@ Deno.serve(async (req) => {
         const results: Anthropic.ToolResultBlockParam[] = [];
         for (const block of response.content) {
           if (block.type !== "tool_use") continue;
-          const out = await runTool(db, block.name, block.input, today, batch, actions);
+          const out = await runTool(db, userData.user.id, block.name, block.input, today, batch, actions);
           results.push({ type: "tool_result", tool_use_id: block.id, content: out });
         }
         messages.push({ role: "user", content: results });
