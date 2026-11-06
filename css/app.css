@@ -1,12 +1,13 @@
 /* Personal Assistant — Look v2 (Nov 2, 2026; v48 Nov 6: all-white page, no warm-gray or light-red fills).
-   Crisp shop-drawing look: white paper, charcoal hairlines, tan + olive fills,
+   Crisp shop-drawing look: white paper, charcoal hairlines, olive fills (tan retired v50),
    red only where it matters. Dark text on a light background, always. Never gray, pink, lavender or teal fills.
    Spec: design/LOOK-v2.md · fallback: branch look-v31 */
 :root {
   --page: #fff; --bar: #fff; --panel: #fff; --paper: #fff;   /* Nov 6: white, not warm gray — the gray read pink on Adam's screen */
   --ink: #111; --ink-2: #444; --ink-3: #777; --rule: #222;
   --maroon: #8c1d2f; --red: #d8222a; --blue: #2a4a8a;
-  --tan: #efe3cc; --tan-2: #e2cfae; --tan-3: #d6c09a; --tan-chip: #d9bb90; --tan-bar: #d6be9a; --other: #efe6d3;
+  /* v50 (Nov 6): Adam picked palette A — olive everywhere, no tan anywhere. Token names kept so the rules below don't churn. */
+  --tan: #cdd4b4; --tan-2: #dfe4cf; --tan-3: #e4e8d8; --tan-chip: #b9c796; --tan-bar: #a9b784; --other: #eef0e6;
   --olive: #dfe4cf; --olive-2: #cdd4b4; --olive-dash: #8a9a6a; --smoke: #c9ccce; --off-stripe: #cdd4b4;   /* PTO / day-off hatching — Adam picks the hue; olive-2 for now */
   --shadow: 1px 1px 0 rgba(0,0,0,.2); --chip-shadow: 2px 2px 0 rgba(0,0,0,.28);
   --radius: 6px;
@@ -502,7 +503,7 @@ body.mini-only #mini-root { display: block; }
   /* week: one card per day */
   .pweek { display: flex; flex-direction: column; gap: 8px; margin: 6px 6px; }
   .pday { border: 1.5px solid var(--blue); border-radius: 9px; background: #fff; overflow: hidden; box-shadow: var(--shadow); }
-  .pday.wk { background: var(--tan); }
+  .pday.wk { background: var(--tan-2); }
   .pday.past { background: var(--olive); border-color: #8a9a6a; opacity: .85; }
   .pday.past.wk { background: var(--olive-2); }
   .pday.off { background-image: repeating-linear-gradient(135deg, var(--off-stripe) 0 6px, transparent 6px 13px); }
@@ -545,7 +546,7 @@ body.mini-only #mini-root { display: block; }
   .pm-dow { font-family: var(--cond); font-size: 11px; font-weight: 700; letter-spacing: 1px; color: var(--ink-3); text-align: center; padding: 2px 0; }
   .pm-cell { min-height: 64px; border: 1px solid var(--blue); border-radius: 6px; background: #fff; padding: 4px 4px 3px; display: flex; flex-direction: column; gap: 2px; cursor: pointer; }
   .pm-cell.blank { border-color: transparent; background: transparent; cursor: default; }
-  .pm-cell.wk { background: var(--tan); }
+  .pm-cell.wk { background: var(--tan-2); }
   .pm-cell.past { background: var(--olive); color: var(--ink-2); }
   .pm-cell.past.wk { background: var(--olive-2); }
   .pm-cell.off { background-image: repeating-linear-gradient(135deg, var(--off-stripe) 0 4px, transparent 4px 9px); }
