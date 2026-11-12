@@ -35,6 +35,7 @@ PINS = {
     3:  {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-06", "bucket": "work", "deleted_at": None},   # T5: removed, restored
     33: {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-07", "bucket": "home", "deleted_at": None},   # T12: a Home chip
 }
+RAW = json.loads(json.dumps(SEED))   # the dump as it is (no pins) — the clock checks run in the Nov 12 world
 for _row in SEED["tasks"]:
     if _row["id"] in PINS: _row.update(PINS[_row["id"]])
 
@@ -65,23 +66,23 @@ def main():
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(executable_path=CHROME, headless=True, args=["--no-sandbox"])
-            def new_page(seed=None, viewport=(1920, 1080), mobile=False):
+            def new_page(seed=None, viewport=(1920, 1080), mobile=False, now=FIXED_NOW, view=None):
                 ctx = browser.new_context(viewport={"width": viewport[0], "height": viewport[1]}, timezone_id="America/Los_Angeles", locale="en-US",
                                           is_mobile=mobile, has_touch=mobile, device_scale_factor=1)
-                ctx.add_init_script("window.__SEED = " + json.dumps(seed or SEED) + "; try { localStorage.setItem('fm.bucket', 'both'); } catch (e) {}")
+                ctx.add_init_script("window.__SEED = " + json.dumps(seed or SEED) + "; try { localStorage.setItem('fm.bucket', 'both'); " + (f"if (!localStorage.getItem('fm.view')) localStorage.setItem('fm.view', '{view}'); " if view else "") + "} catch (e) {}")
                 ctx.route("**/fonts.googleapis.com/**", lambda r: r.abort())
                 ctx.route("**/fonts.gstatic.com/**", lambda r: r.abort())
                 ctx.route("**/s2/favicons**", lambda r: r.abort())   # bill logos — offline here, the initials fallback shows
                 ctx.route("**/functions/v1/ap-brain", lambda r: r.fulfill(status=200, content_type="application/json",
                     body=json.dumps({"reply": "Week is balanced. Moved nothing.", "actions": [], "batch_id": "fake-batch-1"})))
                 page = ctx.new_page()
-                page.clock.install(time=FIXED_NOW)   # Date starts at FIXED_NOW and runs from there
+                page.clock.install(time=now)   # Date starts at FIXED_NOW and runs from there
                 errors = []
                 page.on("pageerror", lambda e: errors.append(str(e)))
                 page.on("console", lambda m: errors.append("console.error: " + m.text) if m.type == "error" and "ERR_FAILED" not in m.text else None)
                 page.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
                 page.wait_for_selector("#app:not(.hidden)")
-                page.wait_for_selector(".pday" if mobile else ".mweek", state="attached", timeout=10000)
+                page.wait_for_selector(".pday" if mobile else ".tg" if view in ("week", "day") else ".mweek", state="attached", timeout=10000)
                 page.wait_for_timeout(600)
                 return page, errors
             def shot(page, name): page.screenshot(path=str(SHOTS / f"{name}.png"))
@@ -363,10 +364,10 @@ def main():
             t.name = "views"
             page, errors = new_page()
             page.click("#view-seg button[data-view='week']"); page.wait_for_timeout(700)
-            t.ok(page.locator(".week .day").count() == 7, "week view has 7 days")
+            t.ok(page.locator(".tg.v-week .tg-col").count() == 7, "week view has 7 day columns on the clock")
             shot(page, "08-week")
             page.click("#view-seg button[data-view='day']"); page.wait_for_timeout(700)
-            t.ok(page.locator(".dayview").count() == 1, "day view renders")
+            t.ok(page.locator(".dayview2 .tg.v-day .tg-col").count() == 1, "day view renders the clock + list")
             page.click("#view-seg button[data-view='month']"); page.wait_for_timeout(500)
             page.click("#bucket-seg button[data-bucket='home']"); page.wait_for_timeout(700)
             t.eq(page.locator(".mscroll .chip[data-id='3']").count(), 0, "work task hidden on Home")
@@ -461,6 +462,159 @@ def main():
             t.ok(page.locator("#rail-body .brow").count() >= 1, "phone lists the bills")
             shot(page, "15-phone-bills")
             t.eq(errors, [], f"no page errors in phone bills: {errors}")
+            page.context.close()
+
+
+            # ---------- T15 clock views (v54): week 1/2/3, set time, drag, pencil, day view ----------
+            NOW2 = "2026-11-12T13:57:00-08:00"   # Thu — the week of Nov 8–14
+            FRI = "2026-11-13"
+            def mtgs(page): return page.evaluate("({m: window.__FAKE.tables.fm_meetings, rules: window.__FAKE.tables.fm_meeting_rules, moves: window.__FAKE.tables.fm_moves})")
+            def local_hm(page, ts): return page.evaluate("(ts) => { const d = new Date(ts); return [d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'), d.getHours() * 60 + d.getMinutes()]; }", ts)
+            t.name = "clock-week"
+            page, errors = new_page(seed=RAW, now=NOW2, view="week")
+            t.eq(page.locator(".tg.v-week.m1 .tg-col").count(), 7, "week opens on view 1 (Tray) with 7 columns")
+            t.eq(page.locator("#wk-modes button.on").get_attribute("data-mode"), "1", "button 1 is lit")
+            t.eq(page.locator(".tg-col.today").get_attribute("data-iso"), "2026-11-12", "today's column is marked")
+            t.eq(page.locator(".tg-col.today .tg-now").count(), 1, "NOW line on today")
+            t.eq(page.locator(".tg-col.today .tgb.mtg").count(), 3, "Thursday shows its 3 meetings on the clock")
+            t.eq(page.locator(".tg-col.today .tgb.mtg.going").count(), 1, "the one he goes to is solid")
+            t.eq(page.locator(".tgb.mtg", has_text="Canceled").count(), 0, "canceled meetings are not drawn")
+            t.eq(page.locator(f".tg-tray[data-iso='{FRI}'] .chip").count(), 3, "Friday's 3 untimed tasks wait in the tray")
+            t.ok(page.evaluate("document.querySelector('.tg').scrollTop") > 20, "the clock opens scrolled to 7 a.m.")
+            # the hour lines line up: an 8:00 meeting sits at the same height in a past, today and plain column
+            tops = page.evaluate("[...document.querySelectorAll('.tgb.mtg')].filter(b => b.textContent.includes('ENS')).map(b => Math.round(b.getBoundingClientRect().top))")
+            t.ok(len(tops) >= 4 and max(tops) - min(tops) <= 1, f"8:00 lines up across columns: {tops}")
+            shot(page, "20-week-1-tray")
+            page.hover("#wk-modes button[data-mode='2']"); page.wait_for_timeout(250)
+            t.ok(page.locator("#wk-modes button[data-mode='2'] .tip").is_visible(), "hovering a view button explains when to use it")
+            shot(page, "21-week-hover")
+            # drag a tray chip onto the clock → that time
+            col = page.locator(f".tg-col[data-iso='{FRI}']")
+            page.locator(f".tg-tray[data-iso='{FRI}'] .chip[data-id='59']").drag_to(col, target_position={"x": 40, "y": 5 * 56 + 2}); page.wait_for_timeout(700)
+            r59 = task(page, 59)
+            t.ok(r59["start_at"] is not None and local_hm(page, r59["start_at"]) == [FRI, 11 * 60], f"dropped at 11:00 → start_at {r59['start_at']}")
+            t.eq(page.locator(f".tg-col[data-iso='{FRI}'] .tgb.task.set[data-id='59']").count(), 1, "it shows as a SET block on Friday")
+            t.eq(page.locator(f".tg-tray[data-iso='{FRI}'] .chip").count(), 2, "and left the tray")
+            t.ok("Undo" in toast_text(page), "setting a time offers Undo")
+            page.locator("#toast .undo").click(); page.wait_for_timeout(600)
+            t.eq(task(page, 59)["start_at"], None, "Undo takes the time back off")
+            # view 2: task list in the panel, Set time from the row
+            page.click("#wk-modes button[data-mode='2']"); page.wait_for_timeout(600)
+            t.eq(page.locator(".tg.v-week.m2").count(), 1, "view 2 on")
+            t.eq(page.locator(f"#rail-body .trow").count(), 3, "panel lists this week's 3 open tasks")
+            t.eq(page.locator(f".tg-tray[data-iso='{FRI}'] .chip").count(), 0, "no chips in the strip in view 2")
+            page.locator("#rail-body .trow[data-id='64'] button", has_text="Set time").click(); page.wait_for_timeout(400)
+            t.eq(page.locator(".pop.timepop").count(), 1, "Set time opens the slot picker")
+            shot(page, "22-week-2-settime")
+            first = page.locator(".pop.timepop .r .o").first.inner_text()
+            page.locator(".pop.timepop .r .o").first.click(); page.wait_for_timeout(600)
+            r64 = task(page, 64)
+            t.ok(r64["start_at"] is not None and local_hm(page, r64["start_at"]) == [FRI, 7 * 60], f"first open slot is 7:00 ({first}) → {r64['start_at']}")
+            t.ok(any(m["kind"] == "update" and m["task_id"] == 64 for m in fake(page)["moves"]), "the time change is logged in fm_moves")
+            t.eq(page.locator("#rail-body .trow[data-id='64'] .tr-when.set").count(), 1, "the row shows the set time")
+            shot(page, "23-week-2-tasklist")
+            # view 3: AP pencils the rest around the meeting he goes to (9–10) and the set task (7–8)
+            page.click("#wk-modes button[data-mode='3']"); page.wait_for_timeout(600)
+            pen = page.evaluate(f"[...document.querySelectorAll(\".tg-col[data-iso='{FRI}'] .tgb.task.pencil\")].map(b => [Number(b.dataset.id), b.querySelector('.t2').textContent.split(' ')[0]])")
+            t.eq(sorted(pen), [[59, "8a–8:15a"], [63, "10a–2p"]], "view 3 pencils the two untimed tasks into open slots")
+            t.eq(page.locator(f".tg-col[data-iso='{FRI}'] .tgb.task.set .tag", has_text="SET").count(), 1, "the set one is tagged SET")
+            page.mouse.move(900, 700); page.wait_for_timeout(200)
+            shot(page, "24-week-3-autofit")
+            page.locator(f".tg-col[data-iso='{FRI}'] .tgb.task.pencil[data-id='63']").click(); page.wait_for_timeout(400)
+            t.ok("lock" in page.locator(".pop.timepop .r .o").first.inner_text(), "clicking a penciled block offers to lock its time")
+            page.locator(".pop.timepop .r .o").first.click(); page.wait_for_timeout(600)
+            t.ok(local_hm(page, task(page, 63)["start_at"]) == [FRI, 10 * 60], "lock sets the penciled time")
+            # moving a timed task to another day drops the time
+            page.locator(f".tg-col[data-iso='{FRI}'] .tgb.task.set[data-id='63']").drag_to(page.locator(".tg-tray[data-iso='2026-11-14']")); page.wait_for_timeout(700)
+            r63 = task(page, 63)
+            t.ok(r63["scheduled_date"] == "2026-11-14" and r63["start_at"] is None, f"dragged to Saturday's strip: day moves, time comes off ({r63['scheduled_date']}, {r63['start_at']})")
+            page.reload(); page.wait_for_selector(".tg"); page.wait_for_timeout(700)
+            t.eq(page.locator("#wk-modes button.on").get_attribute("data-mode"), "3", "the view he picked sticks after a reload")
+            t.eq(errors, [], f"no page errors in clock-week: {errors}")
+            page.context.close()
+
+            # ---------- T16 meetings: I go · I don't go · Remove… → Hidden meetings ----------
+            t.name = "meetings"
+            page, errors = new_page(seed=RAW, now=NOW2, view="week")
+            ens = page.locator(".tg-col.today .tgb.mtg", has_text="ENS")
+            ens.click(); page.wait_for_timeout(400)
+            t.eq(page.locator(".pop.mtgpop .mp-b").count(), 3, "meeting card has I go · I don't go · Remove…")
+            t.ok(page.locator(".pop.mtgpop .mp-b.on", has_text="I don't go").count() == 1, "current answer is marked")
+            page.locator(".pop.mtgpop .mp-b", has_text="Remove").click(); page.wait_for_timeout(300)
+            t.eq(page.locator(".pop.mtgpop .mp-opt").count(), 3, "Remove asks: this one · this and after · all")
+            shot(page, "25-meeting-remove")
+            page.locator(".pop.mtgpop .mp-opt", has_text="Just this one").click(); page.wait_for_timeout(200)
+            page.locator(".pop.mtgpop .mp-acts .btn.primary").click(); page.wait_for_timeout(600)
+            d = mtgs(page)
+            t.eq([m["id"] for m in d["m"] if m["hidden"] and m["title"].startswith("ENS")], [56], "just this one is hidden")
+            t.eq(page.locator(".tg-col.today .tgb.mtg", has_text="ENS").count(), 0, "it is off today's column")
+            t.eq(page.locator(".tg-col[data-iso='2026-11-13'] .tgb.mtg", has_text="ENS").count(), 1, "tomorrow's is still there")
+            t.ok(any(m["kind"] == "mtg_hide" for m in d["moves"]), "the remove is logged")
+            page.locator("#toast .undo").click(); page.wait_for_timeout(600)
+            t.eq(page.locator(".tg-col.today .tgb.mtg", has_text="ENS").count(), 1, "Undo puts it back")
+            # this one and everything after (the default pick)
+            page.locator(".tg-col.today .tgb.mtg", has_text="ENS").click(); page.wait_for_timeout(300)
+            page.locator(".pop.mtgpop .mp-b", has_text="Remove").click(); page.wait_for_timeout(300)
+            t.ok("on" in page.locator(".pop.mtgpop .mp-opt", has_text="everything after").get_attribute("class"), "'this one and everything after' is the default")
+            page.locator(".pop.mtgpop .mp-acts .btn.primary").click(); page.wait_for_timeout(600)
+            d = mtgs(page)
+            hid = [m for m in d["m"] if m["hidden"] and m["title"].startswith("ENS")]
+            t.ok(len(hid) > 20 and min(m["day"] for m in hid) == "2026-11-12", f"everything from today on is hidden ({len(hid)})")
+            t.ok(any(m["title"].startswith("ENS") and not m["hidden"] and m["day"] < "2026-11-12" for m in d["m"]), "earlier ones stay")
+            rule = [r for r in d["rules"] if r["match_title"].startswith("ENS")]
+            t.ok(len(rule) == 1 and rule[0]["hidden"] is True and rule[0]["hide_from"] == "2026-11-12" and rule[0]["attending"] is False, f"a series rule keeps new ones hidden: {rule}")
+            t.eq(page.locator(".tgb.mtg", has_text="ENS").count() , 3, "only Mon–Wed still show it this week")
+            # I go on an invited one
+            page.locator(".tg-col.today .tgb.mtg", has_text="Seattle Staff").click(); page.wait_for_timeout(300)
+            page.locator(".pop.mtgpop .mp-b", has_text="I go").first.click(); page.wait_for_timeout(600)
+            t.ok(next(m for m in mtgs(page)["m"] if m["id"] == 98)["attending"] is True, "I go counts it")
+            t.eq(page.locator(".tg-col.today .tgb.mtg.going").count(), 2, "it turns solid")
+            # Hidden meetings panel: canceled ones are there on their own; Put back works
+            page.keyboard.press("Escape"); page.wait_for_timeout(300)
+            page.locator("#rail-body .row.hid").click(); page.wait_for_timeout(500)
+            t.eq(page.locator("#rail-body .hrow").count(), 2, "Hidden meetings lists the removed series + the canceled one")
+            t.ok("canceled by the organizer" in page.locator("#rail-body .hrow", has_text="Canceled").inner_text(), "the canceled series says why it is hidden")
+            shot(page, "26-hidden-meetings")
+            page.locator("#rail-body .hrow", has_text="ENS").locator("button").click(); page.wait_for_timeout(600)
+            d = mtgs(page)
+            t.eq(len([m for m in d["m"] if m["hidden"] and m["title"].startswith("ENS")]), 0, "Put back un-hides the series")
+            t.ok([r for r in d["rules"] if r["match_title"].startswith("ENS")][0]["hidden"] is False, "and clears the rule")
+            # the day panel's meeting cards carry the same three buttons
+            page.locator("#rail-body .close").click(); page.wait_for_timeout(300)
+            page.locator(".tg-col.today").click(position={"x": 30, "y": 14 * 56 - 20}); page.wait_for_timeout(500)
+            t.ok(page.locator("#rail-body .mtgs .mtg .m-acts").first.locator("button").count() == 3, "day panel meeting cards have the three buttons")
+            shot(page, "27-day-panel-meetings")
+            t.eq(errors, [], f"no page errors in meetings: {errors}")
+            page.context.close()
+
+            # ---------- T17 day view: clock + task list ----------
+            t.name = "clock-day"
+            page, errors = new_page(seed=RAW, now=NOW2, view="week")
+            page.locator(".tg-head .dow", has_text="Friday").click(); page.wait_for_timeout(700)
+            t.eq(page.locator(".dayview2 .tg.v-day .tg-col").get_attribute("data-iso"), FRI, "clicking a weekday box opens that day in Day view")
+            t.eq(page.locator(".dv-side .trow").count(), 3, "Friday's 3 tasks are listed beside the clock")
+            t.eq(page.locator(".dayview2 .tg.v-day .tgb.mtg").count(), 2, "Friday's 2 meetings are on the clock")
+            page.locator(".dv-side .trow[data-id='64'] button", has_text="Set time").click(); page.wait_for_timeout(300)
+            page.locator(".pop.timepop .tin").fill("13:30"); page.locator(".pop.timepop .save").click(); page.wait_for_timeout(600)
+            t.ok(local_hm(page, task(page, 64)["start_at"]) == [FRI, 13 * 60 + 30], "typing a time sets it")
+            t.eq(page.locator(".dayview2 .tgb.task.set[data-id='64']").count(), 1, "it lands on the day's clock")
+            t.ok("on the clock" in page.locator(".dv-side").inner_text().lower(), "and moves to On the clock in the list")
+            shot(page, "28-day-view")
+            page.locator(".dv-side .trow[data-id='64'] button", has_text="Change time").click(); page.wait_for_timeout(300)
+            page.locator(".pop.timepop button", has_text="Take the time off").click(); page.wait_for_timeout(600)
+            t.eq(task(page, 64)["start_at"], None, "Take the time off clears it")
+            page.locator(".dv-side .trow[data-id='59'] button", has_text="Done").click(); page.wait_for_timeout(600)
+            t.eq(task(page, 59)["status"], "done", "Done from the day list")
+            page.click("#view-seg button[data-view='month']"); page.wait_for_timeout(700)
+            t.eq(errors, [], f"no page errors in clock-day: {errors}")
+            page.context.close()
+
+            # a narrower window (his laptop / a snapped window)
+            page, errors = new_page(seed=RAW, now=NOW2, view="week", viewport=(1366, 768))
+            shot(page, "29-week-1366")
+            page.click("#wk-modes button[data-mode='3']"); page.wait_for_timeout(500)
+            shot(page, "30-week-3-1366")
+            t.eq(errors, [], f"no page errors at 1366: {errors}")
             page.context.close()
 
             browser.close()

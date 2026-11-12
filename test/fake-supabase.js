@@ -60,7 +60,8 @@ class Builder {
         else row.id = row.id ?? nextId.fm_meeting_rules++;
         if (t === "fm_bills") { row.deleted_at ??= null; row.recur ??= "monthly"; row.remind_days ??= 2; row.autopay ??= false; row.sort ??= 0; row.photo ??= null; row.notes ??= null; row.ended_on ??= null; row.account_id ??= null; row.domain ??= null; }
         if (t === "fm_bill_payments") { row.paid_at ??= now; row.source ??= "app"; row.amount ??= null; row.note ??= null; if (tables[t].some((x) => x.bill_id === row.bill_id && x.due_date === row.due_date)) return null; }
-        if (t === "fm_tasks") { row.status ??= "not_started"; row.priority ??= "normal"; row.bucket ??= "work"; row.planned ??= false; row.confirmed ??= false; row.nag_hours ??= 0; row.sort ??= 0; row.deleted_at ??= null; row.done_at ??= null; row.scheduled_date ??= null; row.size ??= null; }
+        if (t === "fm_meeting_rules") { row.hidden ??= false; row.hide_from ??= null; row.attending ??= true; }
+        if (t === "fm_tasks") { row.start_at ??= null; row.status ??= "not_started"; row.priority ??= "normal"; row.bucket ??= "work"; row.planned ??= false; row.confirmed ??= false; row.nag_hours ??= 0; row.sort ??= 0; row.deleted_at ??= null; row.done_at ??= null; row.scheduled_date ??= null; row.size ??= null; }
         tables[t].push(row); return row;
       });
       if (out.some((r) => r === null)) return { data: null, error: { message: "duplicate key value violates unique constraint" } };

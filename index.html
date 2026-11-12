@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..900&family=Roboto+Condensed:wght@400;700&display=swap">
-  <link rel="stylesheet" href="css/app.css?v=53">
+  <link rel="stylesheet" href="css/app.css?v=54">
 </head>
 <body>
 
@@ -61,7 +61,7 @@
       <button id="alerts-btn" class="btn ghost sm" title="Desktop pop-ups for meetings and nags">Alerts: off</button>
       <button id="install-btn" class="btn sm hidden" title="Run it in its own window">⬇ Install app</button>
       <button id="logout-btn" class="btn ghost sm" title="Sign out">Sign out</button>
-      <span class="ver" title="App version — tell Claude this number if the look seems stale">v53</span>
+      <span class="ver" title="App version — tell Claude this number if the look seems stale">v54</span>
     </header>
 
     <main class="layout" id="layout">
@@ -76,6 +76,7 @@
           <button id="next-btn" class="btn" aria-label="Next month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg></button>
           <button id="today-btn" class="btn">Today</button>
           <span id="cal-peek" class="peek hidden" aria-live="polite"></span>
+          <div class="seg wkmodes" id="wk-modes" role="group" aria-label="How to work the week view"></div>
           <button id="balance-btn" class="btn" title="Apply the scheduling rules to this week: move overflow with reasons, keep promises and drop-deads. Undo in the Status card or Ctrl+Z.">⇄ Balance week</button>
           <span class="legend bills-legend" aria-label="Bills legend">
             <span class="hl blate">!! LATE · past due</span>
@@ -90,6 +91,8 @@
             <span class="hl norm">● Normal</span>
             <span class="hl low">– Low</span>
             <span class="hl plan">◇ Planned</span>
+            <span class="hl pen" title="AP fit it into an open slot. It moves if the day changes. Click it to lock the time.">┄ Penciled by AP</span>
+            <span class="hl set" title="You picked this time. AP never moves it.">SET = your time</span>
             <span class="hl meet" title="Meeting you go to — counts against your 8 h day">■ Meeting</span>
             <span class="hl off" title="Holiday or PTO — no work goes here">◇ Off</span>
           </span>
@@ -111,6 +114,6 @@
     <div id="toast" class="toast hidden"></div>
   </div>
 
-  <script type="module" src="js/app.js?v=53"></script>
+  <script type="module" src="js/app.js?v=54"></script>
 </body>
 </html>

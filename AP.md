@@ -168,9 +168,27 @@ Paid ✓ + Undo, the Bills view, add a bill, phone Bills tab) and drops screensh
 pinned to `FIXED_NOW` (Playwright's clock API) and the few task rows the checks click on are pinned in `PINS`, so a
 fresh dump of the seed on any later day keeps the checks green. Needs `pip install playwright` and a Chrome binary.
 
+## Clock views (v54)
+- **Week** is an hour grid (6a–8p, opens on 7a, 56 px/h) with three ways to work it, picked with the `#wk-modes` buttons in the
+  calendar header (built from `WK_MODES` in `js/app.js`; hover = when to use it; the pick is kept in `localStorage fm.wkmode`):
+  **1 Tray** (default — untimed tasks wait in a strip on top of each day), **2 Task list** (the left panel lists the week's tasks,
+  each with Set time), **3 Auto-fit** (`pencilPlan()` fits untimed tasks into open slots around attended meetings and set tasks —
+  dashed "PENCILED" blocks, computed on screen, never stored). **Day** = the same grid for one day (64 px/h) + a task list.
+- **Task time** = `fm_tasks.start_at` (timestamptz). A task is "timed" only while `start_at` falls on its `scheduled_date`
+  (`timedMin()`), so anything that moves it to another day drops the time without touching the column. Length = `size`.
+  Set it by dragging onto the clock (snaps to 15 min), the Set time popover (open slots / typed), or locking a penciled block.
+  Timed tasks alert 5 min before and at the time (`alertTick`).
+- **Meetings**: click one → I go · I don't go · Remove… (just this one / this one and everything after / all). Remove sets
+  `fm_meetings.hidden`; a series remove also writes `fm_meeting_rules.hidden` (+ `hide_from`) and the trigger
+  `fm_meetings_hidden_bi` hides matching rows the Outlook sync inserts later, plus anything titled "Canceled: …".
+  Hidden rows load into `state.hiddenMeetings`; the Hidden meetings panel puts a series back. Logged to `fm_moves` as
+  `mtg_hide` / `mtg_show`; Undo works. Outlook itself is never written to.
+- Harness: `test/run_tests.py` T15–T17 (week 1/2/3, drag, set time, pencil + lock, remove/undo/put back, day view) run in the
+  Nov 12 world (`RAW` seed, `NOW2`); shots 20–30.
+
 ## Stages
 1. Calendar, panel, quick add + mic, Add task, brain, undo — done
 2. Scheduled runs (morning, end of day) — done
 3. Meetings on the calendar (Outlook feed direct, every 15 min) — done · days off — done
-4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Day-off look — done (v53: gold square + round seal in month, week, date picker and phone views; past days keep the olive X; ap-brain source wording updated, not yet redeployed, so the deployed brain still says "hatched"). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint options
+4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Day-off look — done (v53: gold square + round seal in month, week, date picker and phone views; past days keep the olive X; ap-brain source wording updated, not yet redeployed, so the deployed brain still says "hatched"). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Clock views — done (v54: week hour grid with Tray / Task list / Auto-fit, day grid + list, task times, meeting Remove + Hidden meetings). Still to do: the Assistant setting a time by voice (ap-brain `start_time`); dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint options
 5. Phone-first polish

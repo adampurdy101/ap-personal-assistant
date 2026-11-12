@@ -9,7 +9,9 @@
 //  on every open (↻N on the chip). Click a chip → that task opens FIRST in the panel.
 //  Bills ($ Bills button): bill chips on the month grid, a hover summary, Paid ✓ in one
 //  click, add/edit bills and accounts, alerts before due dates — data layer in bills.js.
-//  Data: Supabase fm_tasks / fm_jobs / fm_meetings / fm_moves / fm_bills / fm_bill_payments / fm_accounts.
+//  Week = hour grid with 3 ways to work it (1 Tray · 2 Task list · 3 Auto-fit); Day = hour grid + task list.
+//  Tasks can carry a time (start_at). Meetings: I go · I don't go · Remove… → Hidden meetings (Put back).
+//  Data: Supabase fm_tasks / fm_jobs / fm_meetings / fm_meeting_rules / fm_moves / fm_bills / fm_bill_payments / fm_accounts.
 // ============================================================
 import { db } from "./supabase.js";
 import { B, loadBills, occOn, statusOf, paymentFor, monthStats, pastDue, dueWithin, nextDue, amountOf, markPaid, unmarkPaid, saveBill, removeBill, restoreBill, saveAccount, deleteAccount, acctLabel, money, logoUrl, initials, cleanDomain, daysLate } from "./bills.js";
@@ -61,7 +63,11 @@ const state = {
   tasks: [],                                             // live rows (deleted_at is null) — done ones included
   trash: [],                                             // removed rows (deleted_at set); Put back brings them home
   jobs: [],
-  meetings: [],                                          // PCI Outlook meetings (titles + times only)
+  meetings: [],                                          // PCI Outlook meetings (titles + times only) — the ones on the calendar
+  hiddenMeetings: [],                                    // meetings he removed (or the organizer canceled): off the calendar, kept for Put back
+  wkMode: ["1", "2", "3"].includes(localStorage.getItem("fm.wkmode")) ? localStorage.getItem("fm.wkmode") : "1",   // week view: 1 Tray · 2 Task list · 3 Auto-fit
+  wkRail: "tasks",                                       // Task list view: which tab the left panel shows (tasks | overview)
+  tgTop: {},                                             // where each clock view is scrolled to (week / day)
   meetingsSync: null,
   addDraft: "",                                          // Add task panel text, kept across redraws
   addPick: null,                                         // Add task panel choices (day, priority, size, calendar)
@@ -96,12 +102,15 @@ function toast(msg, { undo: withUndo = false, ms = null } = {}) {
 const TRASH_DAYS = 30;   // removed items wait this long in the Trash, then go for good
 async function loadAll() {
   const from = iso(addDays(new Date(), -45)), to = iso(addDays(new Date(), 120));
-  const [t, j, m, billsOk] = await Promise.all([
+  const MCOLS = "id,title,start_at,end_at,all_day,attending,day,updated_at,source";
+  const mtgQ = (cols) => db.from("fm_meetings").select(cols).gte("day", from).lte("day", to).order("start_at");
+  let [t, j, m, billsOk] = await Promise.all([
     db.from("fm_tasks").select("*").order("sort").order("created_at"),
     db.from("fm_jobs").select("*").eq("active", true).order("bucket").order("sort"),
-    db.from("fm_meetings").select("id,title,start_at,end_at,all_day,attending,day,updated_at,source").gte("day", from).lte("day", to).order("start_at"),
+    mtgQ(MCOLS + ",hidden"),
     loadBills(db),
   ]);
+  if (m.error) m = await mtgQ(MCOLS);   // older database without the hidden column: still show the meetings
   if (t.error) { toast("Load failed: " + t.error.message); stampRefresh(false, "load failed"); return false; }
   if (!billsOk && !loadAll._billWarned) { loadAll._billWarned = true; toast("Bills didn't load: " + (B.error || "unknown")); }
   const rows = t.data || [];
@@ -109,8 +118,10 @@ async function loadAll() {
   state.trash = rows.filter((x) => !!x.deleted_at).sort((a, b) => String(b.deleted_at).localeCompare(String(a.deleted_at)));
   state.jobs = j.data || [];
   if (!m.error) {
-    state.meetings = m.data || [];
-    state.meetingsSync = state.meetings.reduce((a, x) => (x.updated_at > a ? x.updated_at : a), "") || null;
+    const all = m.data || [];
+    state.meetings = all.filter((x) => !x.hidden);
+    state.hiddenMeetings = all.filter((x) => x.hidden);
+    state.meetingsSync = all.reduce((a, x) => (x.updated_at > a ? x.updated_at : a), "") || null;
   }
   purgeOldTrash();
   await carryForward();
@@ -172,10 +183,12 @@ async function carryForward() {
     const to = t.bucket === "work" ? landDay(today, "work") : today;
     const from = t.scheduled_date;
     const patch = { scheduled_date: to, planned: false, carried: (t.carried || 0) + 1, carried_from: t.carried_from || from };
+    if (t.start_at) patch.start_at = null;   // the time was for the day it slipped from
     // only if nobody else (another window, the morning plan) moved it first
     const { data, error } = await db.from("fm_tasks").update(patch).eq("id", t.id).eq("scheduled_date", from).select("id");
     if (error || !data || !data.length) continue;
     const before = { scheduled_date: from, planned: t.planned, carried: t.carried || 0, carried_from: t.carried_from || null };
+    if (t.start_at) before.start_at = t.start_at;
     Object.assign(t, patch);
     db.from("fm_moves").insert({ batch_id: "carry-" + today, kind: "move", task_id: t.id, before, after: patch, reason: `Carried forward — not finished on ${fmtShort(from)}`, from_date: from, to_date: to }).then(() => {}, () => {});
     moved.push(t);
@@ -359,13 +372,20 @@ function nextDay(fromISOStr, dir, bucket) {
 const landDay = (dISO, bucket) => (bucket === "work" && dayCapacity(dISO) === 0) ? nextDay(dISO, 1, bucket) : dISO;
 const whyOff = (dISO) => offOn(dISO).length ? `off (${offOn(dISO).map((m) => m.title).join(", ")})` : isWeekend(dISO) ? "the weekend" : "";
 // move a task and log it like the brain does, so Undo and "why" work the same way
+// the three questions asked before a task changes day: promised · past its drop-dead · work on a day off
+function okToMove(t, toISO) {
+  if (t.promised_to && !confirm(`"${t.title}" is promised to ${t.promised_to}. Move it anyway?`)) return false;
+  if (t.dropdead_date && toISO > t.dropdead_date && !confirm(`That is past its drop-dead (${fmtShort(t.dropdead_date)}). Move it anyway?`)) return false;
+  if (t.bucket === "work" && dayCapacity(toISO) === 0 && !confirm(`${fmtShort(toISO)} is ${whyOff(toISO)} — no work goes there. Put it there anyway?\n(Cancel, then use ‹ › or Pick a day for a work day.)`)) return false;
+  return true;
+}
 async function moveTask(t, toISO, reason, { ask = true } = {}) {
   if (!toISO || toISO === t.scheduled_date) return false;
-  if (ask && t.promised_to && !confirm(`"${t.title}" is promised to ${t.promised_to}. Move it anyway?`)) return false;
-  if (ask && t.dropdead_date && toISO > t.dropdead_date && !confirm(`That is past its drop-dead (${fmtShort(t.dropdead_date)}). Move it anyway?`)) return false;
-  if (ask && t.bucket === "work" && dayCapacity(toISO) === 0 && !confirm(`${fmtShort(toISO)} is ${whyOff(toISO)} — no work goes there. Put it there anyway?\n(Cancel, then use ‹ › or Pick a day for a work day.)`)) return false;
+  if (ask && !okToMove(t, toISO)) return false;
   const from = t.scheduled_date;
-  const ok = await patchTask(t, { scheduled_date: toISO, planned: false }, { kind: "move", reason, label: `Move "${t.title}" ${from ? fmtShort(from) : "inbox"} → ${fmtShort(toISO)}` });
+  const patch = { scheduled_date: toISO, planned: false };
+  if (t.start_at) patch.start_at = null;   // a new day starts with no time — set one there if it needs it
+  const ok = await patchTask(t, patch, { kind: "move", reason, label: `Move "${t.title}" ${from ? fmtShort(from) : "inbox"} → ${fmtShort(toISO)}` });
   return ok;
 }
 // order of a day (rulebook 5.3): urgent → promises due → drop-deads within 2 days → planned → high → normal → low · done last
@@ -385,8 +405,10 @@ async function setAttending(m, attending) {
   // applies to every meeting with this exact title (the whole series)
   const { data: s } = await db.auth.getSession();
   const uid = s?.session?.user?.id;
-  await db.from("fm_meeting_rules").delete().eq("match_title", m.title);
-  const ins = await db.from("fm_meeting_rules").insert({ user_id: uid, match_title: m.title, attending, note: "set in app" });
+  const { data: found } = await db.from("fm_meeting_rules").select("*").eq("match_title", m.title);
+  const rule = (found || [])[0];
+  const ins = rule ? await db.from("fm_meeting_rules").update({ attending, note: "set in app" }).eq("id", rule.id)
+    : await db.from("fm_meeting_rules").insert({ user_id: uid, match_title: m.title, attending, note: "set in app" });
   if (ins.error) { toast("Couldn't save: " + ins.error.message); return; }
   const up = await db.from("fm_meetings").update({ attending }).eq("title", m.title);
   if (up.error) { toast("Couldn't save: " + up.error.message); return; }
@@ -408,13 +430,15 @@ function meetingLine(m, { compact = false } = {}) {
 function meetingCard(m) {
   const row = meetingLine(m);
   row.classList.add("card");
+  if (isOff(m)) return row;
+  const acts = el("span", "m-acts");
+  const mk = (label, on, tip, fn) => { const b = el("button", "btn sm" + (on ? " on" : ""), label); b.type = "button"; b.title = tip; b.addEventListener("click", (e) => { e.stopPropagation(); fn(b); }); acts.append(b); };
   if (!m.all_day) {
-    const tag = el("span", "tag", m.attending ? "You go · counts" : "Invited · not counted");
-    const b = el("button", "btn sm", m.attending ? "I don't go" : "I go to this");
-    b.title = "Applies to every meeting with this name";
-    b.addEventListener("click", (e) => { e.stopPropagation(); setAttending(m, !m.attending); });
-    row.append(tag, b);
+    mk("■ I go", m.attending, "Counts against your day — applies to every meeting with this name", () => { if (!m.attending) setAttending(m, true); });
+    mk("◌ I don't go", !m.attending, "Stays gray, not counted — applies to every meeting with this name", () => { if (m.attending) setAttending(m, false); });
   }
+  mk("✕ Remove…", false, "Take it off the calendar: just this one, this one and everything after, or all of them", (b) => openMeetingPop(m, b, { remove: true }));
+  row.append(acts);
   return row;
 }
 function loadLine(dISO) {
@@ -492,7 +516,11 @@ function renderTop() {
 function renderCalendar() {
   const body = $("cal-body");
   body.innerHTML = "";
-  document.querySelector(".cal-head")?.classList.toggle("bills", billsMode());
+  const head = document.querySelector(".cal-head"), wk = state.view === "week" && !billsMode();
+  head?.classList.toggle("bills", billsMode());
+  head?.classList.toggle("wk", wk);
+  head?.classList.toggle("wk3", wk && state.wkMode === "3");
+  document.querySelectorAll("#wk-modes button").forEach((b) => b.classList.toggle("on", b.dataset.mode === state.wkMode));
   if (state.view === "month") renderMonth(body);
   else if (state.view === "week") renderWeek(body);
   else renderDay(body);
@@ -509,6 +537,7 @@ function chipFor(t) {
     q.addEventListener("click", (e) => { e.stopPropagation(); openQuickFix(t, c); });
     c.append(q);
   }
+  if (timedMin(t) != null) c.append(el("b", "tm", fmtMin(timedMin(t))));
   c.append(document.createTextNode(t.title));
   if (t.scheduled_date && !done) {
     const l = el("span", "mv l", "‹"); l.title = "Push a day earlier";
@@ -523,7 +552,7 @@ function chipFor(t) {
     x.addEventListener("click", async (e) => { e.stopPropagation(); if (await removeTask(t)) toast(`Removed "${t.title}" — it's in the Trash`, { undo: true }); });
     c.append(x);
   }
-  c.title = tooltip(t) + (t.confirmed || done ? "" : " · size/priority guessed (?)") + (done ? " · click × to clear it off the day" : "");
+  c.title = (timedMin(t) != null ? fmtSpan(t, timedMin(t)) + " · " : "") + tooltip(t) + (t.confirmed || done ? "" : " · size/priority guessed (?)") + (done ? " · click × to clear it off the day" : "");
   c.draggable = !done;
   c.dataset.id = t.id;
   c.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/plain", String(t.id)); e.dataTransfer.effectAllowed = "move"; });
@@ -841,35 +870,511 @@ function setPeek(m) {
 
 function weekStart(d) { return addDays(d, -d.getDay()); }
 
+// ============================================================
+//  CLOCK VIEWS (v54)
+//  Week = an hour grid with three ways to work it — 1 Tray · 2 Task list · 3 Auto-fit —
+//  picked with the buttons in the header (hover one for when to use it). Day = hour grid
+//  + task list. A task can carry a time (fm_tasks.start_at). It counts as "timed" only
+//  while start_at falls on its scheduled day, so anything that moves it to another day
+//  (app, Assistant, morning plan) drops the time by itself.
+//  Meetings: I go · I don't go · Remove… (this one / this and after / all). Removed
+//  ones wait in Hidden meetings (Put back). Canceled invites hide on their own.
+// ============================================================
+const GRID_START = 6, GRID_END = 20;     // hours on the clock: 6 a.m. – 8 p.m.
+const WEEK_ROW = 56, DAY_ROW = 64;       // px per hour
+const WK_MODES = {
+  "1": { name: "Tray", head: "1 · TRAY — the everyday look", what: "Meetings sit on the clock. Tasks wait in a tray on top of each day.", when: "Use it to see the week at a glance. Drag a task down onto an hour to give it a time." },
+  "2": { name: "Task list", head: "2 · TASK LIST — for planning", what: "The left panel lists every task this week, each with a Set time button.", when: "Use it when you sit down to put times on things, one after the other." },
+  "3": { name: "Auto-fit", head: "3 · AUTO-FIT — AP lays out the day", what: "Tasks with no time get penciled (dashed) into the open slots around your meetings.", when: "Use it to see if the day actually fits. Lock the ones you like; the rest move as the day changes." },
+};
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const minsOf = (ts) => { const d = new Date(ts); return d.getHours() * 60 + d.getMinutes(); };
+// the minute of the day a task is set for — null when it has no time, or the time belongs to another day
+const timedMin = (t) => (t.start_at && t.scheduled_date && iso(new Date(t.start_at)) === t.scheduled_date) ? minsOf(t.start_at) : null;
+const durMin = (t) => Math.round((SIZE_HRS[t.size] ?? 1) * 60);
+const fmtMin = (m) => { const h = Math.floor(m / 60), mm = m % 60; return `${h % 12 || 12}${mm ? ":" + pad(mm) : ""}${h < 12 ? "a" : "p"}`; };
+const fmtSpan = (t, s) => `${fmtMin(s)}–${fmtMin(Math.min(s + durMin(t), 24 * 60 - 1))}`;
+const atISO = (dISO, min) => { const d = fromISO(dISO); d.setHours(Math.floor(min / 60), min % 60, 0, 0); return d.toISOString(); };
+
+// give a task a time (min = minutes after midnight) or take it off (min = null). Moves the day too when dISO differs.
+async function setTime(t, dISO, min, why) {
+  const dayChange = dISO !== t.scheduled_date;
+  if (dayChange && !okToMove(t, dISO)) return false;
+  const patch = { start_at: min == null ? null : atISO(dISO, min) };
+  if (dayChange) { patch.scheduled_date = dISO; patch.planned = false; }
+  const label = min == null ? `Take the time off "${t.title}"` : `Set "${t.title}" to ${fmtMin(min)}${dayChange ? " " + fmtShort(dISO) : ""}`;
+  return patchTask(t, patch, { kind: dayChange ? "move" : "update", reason: why, label });
+}
+
+// what already holds a slot on a day: meetings he goes to + tasks with a set time (every calendar, not just the one on screen)
+function busyOn(dISO, skipId = null) {
+  const out = [];
+  if (!offOn(dISO).length) state.meetings.filter((m) => m.day === dISO && !m.all_day && m.attending).forEach((m) => { const s = minsOf(m.start_at); out.push([s, s + Math.max(15, Math.round(mtgHrs(m) * 60))]); });
+  state.tasks.forEach((t) => { if (t.id === skipId || isDone(t) || t.scheduled_date !== dISO) return; const s = timedMin(t); if (s != null) out.push([s, s + durMin(t)]); });
+  return out;
+}
+// the stretch of a day AP pencils into: 7–4 on a work day, 8–5 on a weekend or day off; today starts from now
+function dayWindow(dISO) {
+  const easy = isWeekend(dISO) || offOn(dISO).length > 0;
+  let s = (easy ? 8 : DAY_START) * 60;
+  const e = (easy ? 17 : DAY_END) * 60;
+  if (dISO === todayISO()) s = Math.max(s, Math.ceil(nowMinutes() / 15) * 15);
+  return [s, e];
+}
+// earliest start at or after `from` where `dur` minutes fit before `to`, clear of everything in busy
+function firstFit(busy, from, to, dur) {
+  let s = from;
+  for (const [bs, be] of busy.slice().sort((a, b) => a[0] - b[0])) {
+    if (be <= s) continue;
+    if (bs - s >= dur) break;
+    s = Math.max(s, be);
+  }
+  return s + dur <= to ? s : null;
+}
+// Auto-fit: every open task with no time, in the order of the day, into the first open slot that holds it
+function pencilPlan(dISO) {
+  const open = tasksOn(dISO).filter((t) => !isDone(t) && timedMin(t) == null);
+  if (dISO < todayISO() || !open.length) return { placed: [], left: open };
+  const busy = busyOn(dISO), [ws, we] = dayWindow(dISO);
+  const placed = [], left = [];
+  for (const t of open) {
+    const s = firstFit(busy, ws, we, durMin(t));
+    if (s == null) left.push(t); else { placed.push({ t, min: s }); busy.push([s, s + durMin(t)]); }
+  }
+  return { placed, left };
+}
+// side-by-side lanes for things that overlap on the clock
+function lanes(items) {
+  items.sort((a, b) => a.s - b.s || b.ve - a.ve);
+  let cluster = [], end = -1, ends = [];
+  const flush = () => { const n = Math.max(...cluster.map((x) => x.lane)) + 1; cluster.forEach((x) => { x.n = n; }); cluster = []; ends = []; end = -1; };
+  for (const it of items) {
+    if (cluster.length && it.s >= end) flush();
+    let l = ends.findIndex((en) => en <= it.s);
+    if (l < 0) { l = ends.length; ends.push(0); }
+    ends[l] = it.ve; it.lane = l; cluster.push(it); end = Math.max(end, it.ve);
+  }
+  if (cluster.length) flush();
+  return items;
+}
+const dayClass = (dISO) => (dISO === todayISO() ? " today" : dISO < todayISO() ? " past" : "") + (isWeekend(dISO) ? " weekend" : "") + (offOn(dISO).length ? " off" : "");
+const taskFromDrop = (e) => state.tasks.find((x) => x.id === Number(e.dataTransfer.getData("text/plain")));
+
+// one block on the clock: a meeting, a task with a set time, or a task AP penciled in
+function tgBlock(it, dISO, mode) {
+  let b;
+  if (it.kind === "mtg") {
+    const m = it.m, span = `${fmtTime(m.start_at)}–${fmtTime(m.end_at)}`;
+    b = el("div", "tgb mtg " + (m.attending ? "going" : "invited"));
+    b.innerHTML = `<div class="t1">${m.attending ? "■" : "◌"} ${esc(m.title)}</div><div class="t2">${esc(span)} · ${m.attending ? "you go" : "invited"}</div>`;
+    b.title = `${m.title} · ${span} · ${m.attending ? "You go — counts against your day" : "Invited — not counted on your day"}\nClick: I go · I don't go · Remove`;
+    b.addEventListener("click", (e) => { e.stopPropagation(); openMeetingPop(m, b); });
+    return b;
+  }
+  const t = it.t, done = isDone(t), pen = it.kind === "pencil";
+  b = el("div", `tgb task ${pen ? "pencil" : "set"} p-${t.priority}` + (t.bucket === "home" && state.bucket === "both" ? " bucket-home" : "") + (done ? " is-done" : ""));
+  b.dataset.id = t.id;
+  const tag = pen ? "PENCILED" : mode === "3" && !done ? "SET" : "";
+  b.innerHTML = `<div class="t1">${done ? "✓" : PRI[t.priority].mark} ${esc(t.title)}</div><div class="t2">${esc(fmtSpan(t, it.s))} · ${esc(SIZE[t.size] || "1 hr")}${tag ? ` <span class="tag">${tag}</span>` : ""}</div>`;
+  b.title = `${t.title} · ${fmtSpan(t, it.s)}\n` + (pen ? "AP penciled it here — it moves if the day changes. Click to lock this time or pick another." : done ? "Done" : "You set this time — AP never moves it. Drag to change it, click to open it.") + `\n${tooltip(t)}`;
+  if (!done) { b.draggable = true; b.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/plain", String(t.id)); e.dataTransfer.effectAllowed = "move"; }); }
+  b.addEventListener("click", (e) => { e.stopPropagation(); if (pen) openTimePop(t, b, dISO, it.s); else openDay(dISO, t.id); });
+  return b;
+}
+
+// one day's column of the clock
+function tgColumn(dISO, rowH, mode) {
+  const col = el("div", "tg-col" + dayClass(dISO));
+  col.dataset.iso = dISO;
+  const y = (min) => (min - GRID_START * 60) / 60 * rowH;
+  const items = [];
+  timedOn(dISO).forEach((m) => { const s = minsOf(m.start_at); items.push({ kind: "mtg", m, s, e: s + Math.max(15, Math.round(mtgHrs(m) * 60)) }); });
+  tasksOn(dISO).forEach((t) => { const s = timedMin(t); if (s != null) items.push({ kind: "set", t, s, e: s + durMin(t) }); });
+  if (mode === "3") pencilPlan(dISO).placed.forEach(({ t, min }) => items.push({ kind: "pencil", t, s: min, e: min + durMin(t) }));
+  const minVis = Math.ceil(24 / rowH * 60);   // a block is never drawn shorter than 22 px
+  items.forEach((it) => { it.s = clamp(it.s, GRID_START * 60, GRID_END * 60 - 15); it.e = clamp(it.e, it.s + 15, GRID_END * 60); it.ve = Math.max(it.e, it.s + minVis); });
+  // meetings he is only invited to ride a slim strip on the right when they share the hour with something real,
+  // so tasks and the meetings he goes to keep their width
+  const ghost = items.filter((it) => it.kind === "mtg" && !it.m.attending), solid = items.filter((it) => !ghost.includes(it));
+  const hit = (x, z) => x.s < z.ve && z.s < x.ve;
+  lanes(solid).forEach((it) => { it.x0 = 0; it.w = ghost.some((g) => hit(it, g)) ? 0.7 : 1; });
+  lanes(ghost).forEach((g) => { const c = solid.some((it) => hit(it, g)); g.x0 = c ? 0.7 : 0; g.w = c ? 0.3 : 1; });
+  items.forEach((it) => {
+    const b = tgBlock(it, dISO, mode);
+    b.style.top = Math.round(y(it.s)) + 1 + "px";
+    const h = Math.max(22, Math.round(y(it.e) - y(it.s)) - 2);
+    b.style.height = h + "px";
+    if (h < 36) b.classList.add("short");                                                   // one line: the title
+    else b.style.setProperty("--lc", String(Math.max(1, Math.floor((h - 21) / 14.7))));     // title lines that fit above the time line
+    b.style.left = `calc(${((it.x0 + it.lane / it.n * it.w) * 100).toFixed(3)}% + 2px)`;
+    b.style.width = `calc(${(it.w / it.n * 100).toFixed(3)}% - 4px)`;
+    col.append(b);
+  });
+  if (dISO === todayISO()) {
+    const nm = nowMinutes();
+    if (nm >= GRID_START * 60 && nm <= GRID_END * 60) { const n = el("div", "tg-now"); n.style.top = Math.round(y(nm)) + "px"; n.append(el("span", "", "NOW " + fmtMin(nm))); col.append(n); }
+  }
+  // drop a task on the clock → that day, that time (snaps to 15 min)
+  const hint = el("div", "tg-hint hidden"); col.append(hint);
+  const minAt = (e) => clamp(GRID_START * 60 + Math.round(((e.clientY - col.getBoundingClientRect().top - col.clientTop) / rowH * 60) / 15) * 15, GRID_START * 60, GRID_END * 60 - 15);
+  col.addEventListener("dragover", (e) => { e.preventDefault(); const m = minAt(e); hint.classList.remove("hidden"); hint.style.top = Math.round(y(m)) + "px"; hint.textContent = fmtMin(m); });
+  col.addEventListener("dragleave", () => hint.classList.add("hidden"));
+  col.addEventListener("drop", async (e) => {
+    e.preventDefault(); e.stopPropagation(); hint.classList.add("hidden");
+    const t = taskFromDrop(e); if (!t) return;
+    const m = minAt(e);
+    if (await setTime(t, dISO, m, `Dragged onto the clock: ${fmtMin(m)} ${fmtShort(dISO)}`)) toast(`${fmtMin(m)} ${fmtShort(dISO).split(",")[0]} — "${t.title}"`, { undo: true });
+  });
+  col.addEventListener("click", () => openDay(dISO));
+  return col;
+}
+
+// the strip on top of a day. Tray view: tasks with no time yet. Other views: all-day items and a count.
+function tgTray(dISO, mode) {
+  const c = el("div", "tg-tray m" + mode + dayClass(dISO));
+  c.dataset.iso = dISO;
+  allDayOn(dISO).forEach((m) => {
+    const n = meetingLine(m, { compact: true });
+    if (!isOff(m)) { n.classList.add("link"); n.title += "\nClick: Remove"; n.addEventListener("click", (e) => { e.stopPropagation(); openMeetingPop(m, n); }); }
+    c.append(n);
+  });
+  const all = tasksOn(dISO), untimed = all.filter((t) => timedMin(t) == null);
+  const note = (cls, txt, title) => { const n = el("div", "tg-note " + cls, txt); if (title) n.title = title; c.append(n); };
+  if (mode === "1") {
+    const show = [...untimed.filter((t) => !isDone(t)), ...untimed.filter(isDone)], max = dISO < todayISO() ? 4 : 6;
+    show.slice(0, max).forEach((t) => c.append(chipFor(t)));
+    if (show.length > max) note("more", `+${show.length - max} more`, show.slice(max).map((t) => (isDone(t) ? "✓" : PRI[t.priority].mark) + " " + t.title).join("\n"));
+  } else if (mode !== "day") {
+    const nOpen = untimed.filter((t) => !isDone(t));
+    if (mode === "2" && nOpen.length) note("wait", `${nOpen.length} waiting for a time`, nOpen.map((t) => PRI[t.priority].mark + " " + t.title).join("\n"));
+    if (mode === "3") { const left = pencilPlan(dISO).left; if (left.length) note("warn", `!! ${left.length} didn't fit`, "No open slot holds these:\n" + left.map((t) => `${PRI[t.priority].mark} ${t.title} (${SIZE[t.size] || "1 hr"})`).join("\n")); }
+    const nDone = all.filter(isDone).length;
+    if (nDone) note("done", `✓ ${nDone} done`);
+  }
+  if (mode !== "day" && showMeetings() && !isWeekend(dISO) && !offOn(dISO).length && dISO >= todayISO()) {
+    const L = dayLoad(dISO), cap = el("div", "tg-cap" + (L.over ? " over" : ""));
+    const fill = el("i"); fill.style.width = Math.min(100, Math.round(L.total / DAY_HRS * 100)) + "%"; cap.append(fill);
+    cap.title = `${L.over ? "!! Over — " : ""}${fmtHrs(L.total)} of 8 h · work ${fmtHrs(L.work)} + meetings you attend ${fmtHrs(L.mtg)}`;
+    c.append(cap);
+  }
+  c.addEventListener("click", () => openDay(dISO));
+  c.addEventListener("dragover", (e) => { e.preventDefault(); c.classList.add("drop"); });
+  c.addEventListener("dragleave", () => c.classList.remove("drop"));
+  c.addEventListener("drop", async (e) => {   // into the tray = on that day, no time
+    e.preventDefault(); e.stopPropagation(); c.classList.remove("drop");
+    const t = taskFromDrop(e); if (!t) return;
+    if (t.scheduled_date !== dISO) { if (await moveTask(t, dISO, "Dragged to " + fmtShort(dISO))) toast("Moved to " + fmtShort(dISO), { undo: true }); }
+    else if (timedMin(t) != null && await setTime(t, dISO, null, "Dragged back to the tray — no time")) toast(`Time taken off "${t.title}"`, { undo: true });
+  });
+  return c;
+}
+
+function timeGrid(days, { rowH, mode, view }) {
+  const one = days.length === 1;
+  const wkFr = state.bucket === "home" ? 1 : state.bucket === "work" ? 0.42 : 0.62;   // weekends run slim unless he is on the Home calendar
+  const g = el("div", "tg v-" + view + " m" + mode);
+  g.style.setProperty("--rowh", rowH + "px");
+  g.style.setProperty("--rows", String(GRID_END - GRID_START));
+  g.style.setProperty("--tg-cols", one ? "54px minmax(0, 1fr)" : "50px " + days.map((d) => `minmax(0, ${isWeekend(iso(d)) ? wkFr : 1}fr)`).join(" "));
+  const top = el("div", "tg-top");
+  if (!one) {
+    const h = el("div", "tg-row tg-head"); h.append(el("div", ""));
+    days.forEach((d) => {
+      const dISO = iso(d), slim = isWeekend(dISO) && wkFr < 1;
+      const b = el("button", "dow" + (dISO === todayISO() ? " td" : "") + (isWeekend(dISO) ? " wkd" : ""), `${d.toLocaleDateString("en-US", { weekday: slim ? "short" : "long" })} ${d.getDate()}`);
+      b.type = "button"; b.title = `Open ${fmtLong(dISO)} in Day view`;
+      b.addEventListener("click", () => { state.view = "day"; localStorage.setItem("fm.view", "day"); state.cursor = fromISO(dISO); render({ now: true }); });
+      h.append(b);
+    });
+    top.append(h);
+  }
+  if (!one || allDayOn(iso(days[0])).length) {
+    const s = el("div", "tg-row tg-strip");
+    const lab = el("div", "tg-slab"); lab.innerHTML = mode === "1" ? "NO TIME<br>YET" : "ALL<br>DAY";
+    lab.title = mode === "1" ? "Tasks on the day with no time yet. Drag one down onto an hour." : "All-day items from Outlook, plus what is waiting or done.";
+    s.append(lab);
+    days.forEach((d) => s.append(tgTray(iso(d), mode)));
+    top.append(s);
+  }
+  g.append(top);
+  const body = el("div", "tg-row tg-body");
+  const gut = el("div", "tg-gut");
+  for (let h = GRID_START; h < GRID_END; h++) gut.append(el("div", "tg-hr" + (h < DAY_START || h >= DAY_END ? " after" : ""), `${h % 12 || 12} ${h < 12 ? "AM" : "PM"}`));
+  body.append(gut);
+  days.forEach((d) => body.append(tgColumn(iso(d), rowH, mode)));
+  g.append(body);
+  // open on 7 a.m.; after that, stay where he left it
+  let placed = false;
+  const place = () => { if (placed || !g.isConnected) return; g.scrollTop = state.tgTop[view] ?? Math.max(0, (DAY_START - GRID_START) * rowH - 2); placed = true; };
+  g.addEventListener("scroll", () => { if (placed && g.isConnected) state.tgTop[view] = g.scrollTop; });   // a grid that was just replaced reports 0 — never keep that
+  requestAnimationFrame(place); setTimeout(place, 60);
+  return g;
+}
+
 function renderWeek(body) {
   const s = weekStart(state.cursor), e = addDays(s, 6);
   $("cal-title").textContent = `${s.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${e.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
-  const grid = el("div", "week");
-  for (let i = 0; i < 7; i++) {
-    const d = addDays(s, i);
-    grid.append(el("div", "dow" + (iso(d) === todayISO() ? " td" : "") + (i === 0 || i === 6 ? " wkd" : ""), d.toLocaleDateString("en-US", { weekday: "long", day: "numeric" })));
+  if (billsMode()) {   // bills keep the plain week of day boxes
+    const grid = el("div", "week");
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(s, i);
+      grid.append(el("div", "dow" + (iso(d) === todayISO() ? " td" : "") + (i === 0 || i === 6 ? " wkd" : ""), d.toLocaleDateString("en-US", { weekday: "long", day: "numeric" })));
+    }
+    for (let i = 0; i < 7; i++) grid.append(dayCell(addDays(s, i), { max: 12 }));
+    body.append(grid);
+    return;
   }
-  for (let i = 0; i < 7; i++) grid.append(dayCell(addDays(s, i), { max: 12 }));
-  body.append(grid);
+  body.append(timeGrid([...Array(7)].map((_, i) => addDays(s, i)), { rowH: WEEK_ROW, mode: state.wkMode, view: "week" }));
 }
 const DOW_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
+// a task as a row with its time and the buttons to act on it (Day view list · Task list panel)
+function timeRow(t, dISO, { push = false } = {}) {
+  const done = isDone(t), tm = timedMin(t);
+  const row = el("div", "trow" + (t.bucket === "home" && state.bucket === "both" ? " bucket-home" : "") + (done ? " is-done" : ""));
+  row.dataset.id = t.id;
+  const title = el("div", "tr-title"); title.append(el("b", "sym", done ? "✓" : PRI[t.priority].mark), document.createTextNode(t.title));
+  title.title = tooltip(t) + " · click to open it";
+  title.addEventListener("click", () => openDay(dISO, t.id));
+  const meta = el("div", "tr-meta");
+  const when = el("span", "tr-when" + (tm != null ? " set" : ""), tm != null ? fmtSpan(t, tm) : "no time yet");
+  meta.append(when, el("span", "tr-size", SIZE[t.size] || "1 hr"));
+  if (t.dropdead_date && !done) meta.append(el("span", "tr-dd", "drop-dead " + fmtShort(t.dropdead_date).replace(",", "")));
+  const acts = el("div", "tr-acts");
+  const btn = (label, cls, fn, tip) => { const b = el("button", "btn sm " + cls, label); b.type = "button"; if (tip) b.title = tip; b.addEventListener("click", (e) => { e.stopPropagation(); fn(b); }); acts.append(b); return b; };
+  if (!done) {
+    btn(tm != null ? "Change time" : "Set time", "", (b) => openTimePop(t, b, dISO), "Pick an open slot, type a time, or take the time off");
+    btn("✓ Done", "olive", async () => { if (await markDone(t)) toast(`Done: "${t.title}"`, { undo: true }); });
+    if (push) btn("Push →", "", async () => { const to = nextDay(dISO, 1, t.bucket); if (await moveTask(t, to, "Pushed a day later from Day view")) toast("Moved to " + fmtShort(to), { undo: true }); }, "Move it to the next day (work skips weekends and days off)");
+    row.draggable = true;
+    row.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/plain", String(t.id)); e.dataTransfer.effectAllowed = "move"; });
+  }
+  row.append(title, meta, acts);
+  return row;
+}
+
+// Day view: the clock on the left, the day's tasks on the right
 function renderDay(body) {
   const dISO = iso(state.cursor);
   $("cal-title").textContent = fmtLong(dISO);
-  const wrap = el("div", "dayview");
   if (billsMode()) {
+    const wrap = el("div", "dayview");
     const occ = occOn(dISO);
     if (!occ.length) wrap.append(el("div", "empty", "No bills due this day."));
     occ.forEach((o) => wrap.append(billCard(o)));
     body.append(wrap);
     return;
   }
-  const items = tasksOn(dISO);
-  if (showMeetings()) { wrap.append(loadLine(dISO)); meetingsSection(wrap, dISO); if (meetingsOn(dISO).length) wrap.append(el("h3", "", "Tasks")); }
-  if (!items.length) wrap.append(el("div", "empty", "Nothing on this day. Drag something here or use Quick add."));
-  items.forEach((t) => wrap.append(itemCard(t)));
+  const wrap = el("div", "dayview2");
+  if (showMeetings() && !isWeekend(dISO)) wrap.append(loadLine(dISO));
+  const cols = el("div", "dv-cols");
+  cols.append(timeGrid([state.cursor], { rowH: DAY_ROW, mode: "day", view: "day" }));
+  const side = el("div", "dv-side");
+  const items = tasksOn(dISO), open = items.filter((t) => !isDone(t));
+  const untimed = open.filter((t) => timedMin(t) == null), timed = open.filter((t) => timedMin(t) != null).sort((a, b) => timedMin(a) - timedMin(b));
+  const done = items.filter(isDone);
+  const s1 = card(side, `Tasks · no time yet · ${untimed.length}`);
+  if (!untimed.length) s1.append(el("div", "empty", open.length ? "Everything on this day has a time." : "Nothing on this day. Drag something here or use Quick add."));
+  untimed.forEach((t) => s1.append(timeRow(t, dISO, { push: true })));
+  if (untimed.length) s1.append(el("div", "hint", "Drag one onto the clock, or press Set time."));
+  if (timed.length) { const s2 = card(side, `On the clock · ${timed.length}`); timed.forEach((t) => s2.append(timeRow(t, dISO, { push: true }))); }
+  const s3 = card(side, `Done · ${done.length}`);
+  if (!done.length) s3.append(el("div", "empty", "Nothing done yet on this day."));
+  done.forEach((t) => rowFor(s3, t));
+  // tasks dropped on the list lose their time (back to "no time yet")
+  side.addEventListener("dragover", (e) => e.preventDefault());
+  side.addEventListener("drop", async (e) => { e.preventDefault(); const t = taskFromDrop(e); if (t && t.scheduled_date === dISO && timedMin(t) != null && await setTime(t, dISO, null, "Dragged back to the list — no time")) toast(`Time taken off "${t.title}"`, { undo: true }); });
+  cols.append(side);
+  wrap.append(cols);
   body.append(wrap);
+}
+
+// Task list view of the week (left panel): every day's tasks with Set time right on the row
+function renderWeekTasks(r) {
+  const s = weekStart(state.cursor);
+  let any = false;
+  for (let i = 0; i < 7; i++) {
+    const dISO = iso(addDays(s, i)), items = tasksOn(dISO), open = items.filter((t) => !isDone(t)), nDone = items.length - open.length;
+    if (!open.length && dISO !== todayISO()) continue;   // days with nothing open stay out of the way
+    any = true;
+    const d = fromISO(dISO);
+    const sec = card(r, `${dISO === todayISO() ? "Today · " : ""}${d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}`, { sub: `${open.length} open${nDone ? ` · ${nDone} done` : ""}`, cls: dISO === todayISO() ? "wt-today" : "" });
+    if (!open.length) sec.append(el("div", "empty", nDone ? "All done for today." : "Nothing open today."));
+    open.forEach((t) => sec.append(timeRow(t, dISO)));
+  }
+  if (!any) { const sec = card(r, "This week"); sec.append(el("div", "empty", "Nothing on this week yet.")); }
+  const wkDone = [...Array(7)].reduce((a, _, i) => a + tasksOn(iso(addDays(s, i))).filter(isDone).length, 0);
+  if (wkDone) { const sD = card(r, `Done this week · ${wkDone}`); const row = el("div", "row link", "✓ See what got done — Done log"); row.addEventListener("click", () => openPanel("done")); sD.append(row); }
+  const inbox = unscheduled();
+  const sI = card(r, `No day yet · ${inbox.length}`);
+  if (!inbox.length) sI.append(el("div", "empty", "Inbox is empty."));
+  inbox.slice(0, 6).forEach((t) => rowFor(sI, t));
+  if (inbox.length > 6) { const m = el("div", "row link", `+${inbox.length - 6} more — open the inbox`); m.addEventListener("click", () => openUnscheduled()); sI.append(m); }
+}
+
+// ---------- Set time popover: open slots first, or type one ----------
+function openTimePop(t, anchor, dISO, suggest = null) {
+  closeQuickFix();
+  const p = el("div", "pop timepop");
+  const cur = timedMin(t), dur = durMin(t), busy = busyOn(dISO, t.id);
+  p.innerHTML = `<div class="ttl">Time for <b>${esc(t.title)}</b> · ${esc(SIZE[t.size] || "1 hr")} · ${esc(fmtShort(dISO))}</div>`;
+  const go = async (min, why) => { closeQuickFix(); if (await setTime(t, dISO, min, why)) toast(min == null ? `Time taken off "${t.title}"` : `${fmtMin(min)} — "${t.title}"`, { undo: true }); };
+  // open slots: the first one that fits, then the top of each hour after it that is still clear
+  const slots = []; let from = dayWindow(dISO)[0];
+  if (suggest != null) slots.push(suggest);
+  for (let i = 0; i < 12 && slots.length < 8; i++) { const s = firstFit(busy, from, GRID_END * 60, dur); if (s == null) break; if (!slots.includes(s)) slots.push(s); from = (Math.floor(s / 60) + 1) * 60; }
+  p.append(el("span", "h", "OPEN SLOTS — CLEAR OF MEETINGS AND SET TASKS"));
+  const r1 = el("div", "r");
+  if (!slots.length) r1.append(el("span", "hint", "No open slot left on this day that holds it."));
+  slots.forEach((s, i) => {
+    const b = el("button", "o" + (s === cur || (cur == null && i === 0) ? " on" : ""), fmtMin(s) + (s === suggest ? " · lock" : "")); b.type = "button";
+    b.title = `${fmtSpan(t, s)}${s === suggest ? " — where AP penciled it" : ""}`;
+    b.addEventListener("click", () => go(s, s === suggest ? `Locked AP's penciled time ${fmtMin(s)}` : `Set to ${fmtMin(s)} from the open slots`));
+    r1.append(b);
+  });
+  p.append(r1);
+  p.append(el("span", "h", "OR TYPE A TIME"));
+  const r2 = el("div", "r");
+  const inp = el("input", "tin"); inp.type = "time"; inp.step = "900";
+  const seed = cur ?? slots[0] ?? DAY_START * 60; inp.value = `${pad(Math.floor(seed / 60))}:${pad(seed % 60)}`;
+  const set = el("button", "o save", "Set"); set.type = "button";
+  set.addEventListener("click", () => { const [h, m] = (inp.value || "").split(":").map(Number); if (Number.isFinite(h) && Number.isFinite(m)) go(h * 60 + m, `Typed ${fmtMin(h * 60 + m)}`); });
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); set.click(); } });
+  r2.append(inp, set);
+  if (cur != null) { const x = el("button", "o", "Take the time off"); x.type = "button"; x.style.marginLeft = "auto"; x.addEventListener("click", () => go(null, "Time taken off in the app")); r2.append(x); }
+  p.append(r2);
+  p.addEventListener("click", (e) => e.stopPropagation());
+  document.body.append(p);
+  placePop(p, anchor, 330, p.offsetHeight || 170);
+  popEl = p;
+}
+
+// ---------- meetings: I go · I don't go · Remove… ----------
+// every loaded meeting of the same series (same Outlook title)
+const seriesOf = (m) => state.meetings.filter((x) => x.source === m.source && x.title === m.title);
+const isCanceled = (m) => /^cancel+ed\s*:/i.test(m.title || "");
+// remove = hide. scope: "one" (this meeting) · "after" (this one and everything after) · "all" (the whole series).
+// A series rule keeps new ones from the Outlook sync hidden too. Undo and Hidden meetings both bring them back.
+async function hideMeetings(m, scope) {
+  const rows = scope === "one" ? [m] : seriesOf(m).filter((x) => scope === "all" || x.day >= m.day);
+  const ids = rows.map((x) => x.id);
+  let q = db.from("fm_meetings").update({ hidden: true });
+  q = scope === "one" ? q.eq("id", m.id) : q.eq("source", m.source).eq("title", m.title);
+  if (scope === "after") q = q.gte("day", m.day);
+  const up = await q;
+  if (up.error) { toast("Couldn't remove it: " + up.error.message); return false; }
+  let ruleUndo = null;
+  if (scope !== "one") {
+    const { data: found } = await db.from("fm_meeting_rules").select("*").eq("match_title", m.title);
+    const rule = (found || [])[0], want = { hidden: true, hide_from: scope === "after" ? m.day : null };
+    if (rule) { await db.from("fm_meeting_rules").update(want).eq("id", rule.id); ruleUndo = () => db.from("fm_meeting_rules").update({ hidden: !!rule.hidden, hide_from: rule.hide_from ?? null }).eq("id", rule.id); }
+    else {
+      const { data: s } = await db.auth.getSession();
+      const ins = await db.from("fm_meeting_rules").insert({ user_id: s?.session?.user?.id, match_title: m.title, attending: !!m.attending, ...want, note: "removed in app" }).select().single();
+      if (ins.data?.id) ruleUndo = () => db.from("fm_meeting_rules").delete().eq("id", ins.data.id);
+    }
+  }
+  const gone = new Set(ids);
+  state.hiddenMeetings.push(...state.meetings.filter((x) => gone.has(x.id)).map((x) => Object.assign(x, { hidden: true })));
+  state.meetings = state.meetings.filter((x) => !gone.has(x.id));
+  const what = scope === "one" ? `"${m.title}" on ${fmtShort(m.day)}` : scope === "after" ? `"${m.title}" from ${fmtShort(m.day)} on (${ids.length})` : `every "${m.title}" (${ids.length})`;
+  db.from("fm_moves").insert({ batch_id: "app-" + todayISO(), kind: "mtg_hide", task_id: null, before: { title: m.title, day: m.day, scope, ids }, after: { hidden: true }, reason: `Removed from the calendar in the app: ${what}` }).then(() => {}, () => {});
+  pushUndo(`Remove ${what}`, async () => {
+    const back = await db.from("fm_meetings").update({ hidden: false }).in("id", ids);
+    if (back.error) { toast("Couldn't put it back: " + back.error.message); return false; }
+    if (ruleUndo) await ruleUndo();
+    db.from("fm_moves").insert({ batch_id: "app-" + todayISO(), kind: "undo", task_id: null, before: { hidden: true }, after: { title: m.title, ids }, reason: `Undo: remove ${what}` }).then(() => {}, () => {});
+    state.meetings.push(...state.hiddenMeetings.filter((x) => gone.has(x.id)).map((x) => Object.assign(x, { hidden: false })));
+    state.hiddenMeetings = state.hiddenMeetings.filter((x) => !gone.has(x.id));
+    return true;
+  });
+  toast(`Removed ${what} — it's in Hidden meetings`, { undo: true });
+  render();
+  return true;
+}
+// Put back from Hidden meetings: the whole series with that title
+async function unhideSeries(title) {
+  const rows = state.hiddenMeetings.filter((x) => x.title === title), ids = rows.map((x) => x.id);
+  const back = await db.from("fm_meetings").update({ hidden: false }).in("id", ids);
+  if (back.error) { toast("Couldn't put it back: " + back.error.message); return false; }
+  await db.from("fm_meeting_rules").update({ hidden: false, hide_from: null }).eq("match_title", title);
+  const set = new Set(ids);
+  state.meetings.push(...rows.map((x) => Object.assign(x, { hidden: false })));
+  state.hiddenMeetings = state.hiddenMeetings.filter((x) => !set.has(x.id));
+  db.from("fm_moves").insert({ batch_id: "app-" + todayISO(), kind: "mtg_show", task_id: null, before: { hidden: true }, after: { title, ids }, reason: `Put back on the calendar: "${title}" (${ids.length})` }).then(() => {}, () => {});
+  toast(`"${title}" is back on the calendar (${ids.length})`);
+  render();
+  return true;
+}
+
+function openMeetingPop(m, anchor, { remove = false } = {}) {
+  closeQuickFix();
+  const p = el("div", "pop mtgpop");
+  const ser = seriesOf(m), tot = ser.length, after = ser.filter((x) => x.day >= m.day).length;
+  const when = m.all_day ? `${fmtLong(m.day)} · all day` : `${fmtLong(m.day)} · ${fmtTime(m.start_at)}–${fmtTime(m.end_at)}`;
+  p.innerHTML = `<span class="h">MEETING · FROM OUTLOOK</span><div class="mp-title">${esc(m.title)}</div><div class="mp-when">${esc(when)}${tot > 1 ? ` · repeats — ${tot} on your calendar` : ""}</div>`;
+  const row = el("div", "mp-big");
+  const big = (sym, label, sub, on, fn, tip) => { const b = el("button", "mp-b" + (on ? " on" : "")); b.type = "button"; b.innerHTML = `<b>${sym} ${label}</b><span>${sub}</span>`; if (tip) b.title = tip; b.addEventListener("click", fn); row.append(b); return b; };
+  if (!m.all_day) {
+    big("■", "I go", "Counts against my day", m.attending, () => { closeQuickFix(); if (!m.attending) setAttending(m, true); }, "Applies to every meeting with this name");
+    big("◌", "I don't go", "Stays gray, not counted", !m.attending, () => { closeQuickFix(); if (m.attending) setAttending(m, false); }, "Applies to every meeting with this name");
+  }
+  const pick = el("div", "mp-pick hidden");
+  let scope = "after";
+  const drawPick = () => {
+    pick.innerHTML = "";
+    pick.append(el("div", "mp-q", "Remove which ones?"));
+    const n = { one: 1, after, all: tot };
+    [["one", "Just this one", fmtShort(m.day) + " only"], ["after", "This one and everything after", `${after} from ${fmtShort(m.day)} on`], ["all", "All of them, past and upcoming", `${tot} total`]].forEach(([k, label, sub]) => {
+      const o = el("button", "mp-opt" + (scope === k ? " on" : "")); o.type = "button";
+      o.innerHTML = `<i class="dot"></i><span><b>${label}</b><small>${esc(sub)}</small></span>`;
+      o.addEventListener("click", () => { scope = k; drawPick(); });
+      pick.append(o);
+    });
+    const a = el("div", "mp-acts");
+    const c = el("button", "btn sm", "Cancel"); c.type = "button"; c.addEventListener("click", closeQuickFix);
+    const go = el("button", "btn sm primary", `Remove ${n[scope]}`); go.type = "button"; go.addEventListener("click", () => { closeQuickFix(); hideMeetings(m, scope); });
+    a.append(c, go); pick.append(a);
+  };
+  const showPick = () => {
+    if (tot <= 1) { closeQuickFix(); hideMeetings(m, "one"); return; }
+    drawPick(); pick.classList.remove("hidden");
+    placePop(p, anchor, 400, p.offsetHeight);
+  };
+  const rm = big("✕", tot > 1 ? "Remove…" : "Remove", "Take it off my calendar", false, showPick);
+  p.append(row, pick);
+  const foot = el("div", "mp-foot");
+  foot.append(el("span", "", "Removed meetings wait in "));
+  const hl = el("button", "lnk", `Hidden meetings${state.hiddenMeetings.length ? ` (${new Set(state.hiddenMeetings.map((x) => x.title)).size})` : ""}`); hl.type = "button";
+  hl.addEventListener("click", () => { closeQuickFix(); openPanel("hiddenmtg"); });
+  foot.append(hl, el("span", "", " — put back any time. Outlook itself is not touched."));
+  p.append(foot);
+  p.addEventListener("click", (e) => e.stopPropagation());
+  document.body.append(p);
+  placePop(p, anchor, 400, p.offsetHeight || 220);
+  popEl = p;
+  if (remove) showPick();
+}
+
+// Hidden meetings: everything removed from the calendar, by series, with Put back
+function renderHiddenPanel(r) {
+  const by = new Map();
+  state.hiddenMeetings.forEach((m) => { if (!by.has(m.title)) by.set(m.title, []); by.get(m.title).push(m); });
+  panelHeader(r, "Hidden meetings", `${by.size} series`);
+  const sec = card(r, "Removed from your calendar", { sub: "still in Outlook — AP just doesn't draw them" });
+  if (!by.size) sec.append(el("div", "empty", "Nothing hidden. Click a meeting → Remove… to take one off the calendar."));
+  const today = todayISO();
+  [...by.entries()].sort((a, b) => b[1].length - a[1].length).forEach(([title, rows]) => {
+    rows.sort((a, b) => String(a.start_at).localeCompare(String(b.start_at)));
+    const next = rows.find((x) => x.day >= today), up = rows.filter((x) => x.day >= today).length;
+    const row = el("div", "hrow");
+    const txt = el("div", "h-txt");
+    txt.append(el("b", "", title));
+    txt.append(el("small", "", `${rows.length} hidden${up ? ` · ${up} upcoming` : ""}${next ? ` · next ${fmtShort(next.day)}${next.all_day ? "" : " " + fmtTime(next.start_at)}` : ""}${isCanceled(rows[0]) ? " · canceled by the organizer — hidden automatically" : ""}`));
+    const b = el("button", "btn sm", "Put back"); b.type = "button"; b.title = "Back on the calendar, every one of them";
+    b.addEventListener("click", () => unhideSeries(title));
+    row.append(txt, b); sec.append(row);
+  });
 }
 
 // ---------- rail ----------
@@ -890,8 +1395,21 @@ function renderRail() {
   if (state.panel === "unscheduled") return renderUnscheduledPanel(r);
   if (state.panel === "done") return renderDonePanel(r);
   if (state.panel === "trash") return renderTrashPanel(r);
+  if (state.panel === "hiddenmtg") return renderHiddenPanel(r);
   if (state.panel === "add") return renderAddPanel(r);
   if (state.panel === "brain") return renderBrainPanel(r);
+  // Week · Task list view: the panel carries the week's tasks (Overview is one tab away)
+  if (state.view === "week" && state.wkMode === "2") {
+    const n = [...Array(7)].reduce((a, _, i) => a + openOn(iso(addDays(weekStart(state.cursor), i))).length, 0);
+    const tabs = el("div", "seg railtabs");
+    [["tasks", `Week tasks · ${n}`], ["overview", "Overview"]].forEach(([k, label]) => {
+      const b = el("button", state.wkRail === k ? "on" : "", label); b.type = "button";
+      b.addEventListener("click", () => { state.wkRail = k; render({ now: true }); });
+      tabs.append(b);
+    });
+    r.append(tabs);
+    if (state.wkRail === "tasks") return renderWeekTasks(r);
+  }
   renderSkinny(r);
 }
 
@@ -1207,7 +1725,8 @@ function renderSkinny(r) {
   if (showMeetings()) {
     const ms = meetingsOn(today).filter((m) => !m.all_day).sort((a, b) => a.start_at.localeCompare(b.start_at));
     const offs = offOn(today);
-    if (ms.length || offs.length) {
+    const nHid = new Set(state.hiddenMeetings.map((m) => m.title)).size;
+    if (ms.length || offs.length || nHid) {
       const sM = card(r, "Meetings", { sub: "from Outlook" });
       offs.forEach((m) => { const row = el("div", "row wrap" + (isHoliday(m) ? " holiday" : "")); row.innerHTML = `◇ <b>${esc(m.title)}</b><i>day off</i>`; sM.append(row); });
       ms.forEach((m) => {
@@ -1217,6 +1736,8 @@ function renderSkinny(r) {
         row.addEventListener("click", () => openDay(today));
         sM.append(row);
       });
+      if (!ms.length && !offs.length) sM.append(el("div", "empty", "No meetings today."));
+      if (nHid) { const h = el("div", "row link hid", `✕ ${nHid} hidden meeting series — see them / put back`); h.title = "Meetings you removed, and ones the organizer canceled"; h.addEventListener("click", () => openPanel("hiddenmtg")); sM.append(h); }
     }
   }
 
@@ -1697,6 +2218,7 @@ function itemCard(t) {
   const st = el("span", `status-pill ${s.cls}`, s.text);
   const caret = el("span", "caret", state.openId === t.id ? "▴" : "▾");
   head.append(chip, title);
+  if (timedMin(t) != null && t.status !== "done") head.append(el("span", "status-pill tm", fmtMin(timedMin(t))));
   if (!t.confirmed && t.status !== "done") { const q = el("span", "status-pill q", "? est. time"); q.title = "Estimated time and priority were guessed by AP — open it to set them"; head.append(q); }
   head.append(st, caret);
   head.addEventListener("click", () => { state.openId = state.openId === t.id ? null : t.id; state.editId = null; render(); });
@@ -1711,7 +2233,7 @@ function itemCard(t) {
       if (t.size) bits.push(`<b>Est. time:</b> ${esc(SIZE[t.size])}${t.confirmed ? "" : " (AP's guess)"}`);
       bits.push(`<b>Calendar:</b> ${t.bucket === "home" ? "Home" : "Work"}`);
       d.innerHTML = bits.join(" · ") + "<br>"
-        + `<b>Scheduled:</b> ${t.scheduled_date ? esc(fmtShort(t.scheduled_date)) : "—"} · `
+        + `<b>Scheduled:</b> ${t.scheduled_date ? esc(fmtShort(t.scheduled_date)) : "—"}${timedMin(t) != null ? " at <b>" + esc(fmtSpan(t, timedMin(t))) + "</b>" : ""} · `
         + `<b>Target:</b> ${t.target_date ? esc(fmtShort(t.target_date)) : "—"} · `
         + `<b>Drop-dead:</b> ${t.dropdead_date ? esc(fmtShort(t.dropdead_date)) : "—"}`
         + (t.promised_to ? `<br><b>Promised to:</b> ${esc(t.promised_to)}` : "")
@@ -1742,6 +2264,7 @@ function itemCard(t) {
       // only when they apply
       const r3 = el("div", "actions");
       if (t.status === "not_started" || t.status === "waiting") r3.append(btn("Working", () => patchTask(t, { status: "working" }, { reason: "Marked Working in the app", label: `Working on "${t.title}"` })));
+      if (t.scheduled_date && !isDone(t)) { const tm = timedMin(t); const b = btn(tm != null ? `Time: ${fmtMin(tm)} — change` : "Set a time"); b.title = "Put it on the clock: pick an open slot or type a time"; b.addEventListener("click", (e) => { e.stopPropagation(); openTimePop(t, b, t.scheduled_date); }); r3.append(b); }
       if (t.planned) r3.append(btn("Make it real", () => patchTask(t, { planned: false }, { reason: "Planned → real, in the app", label: `Make "${t.title}" real` })));
       if (!t.confirmed && t.status !== "done") { const q = btn("? Set est. time + priority"); q.addEventListener("click", (e) => { e.stopPropagation(); openQuickFix(t, q); }); r3.append(q); }
       if (r3.children.length) card.append(r3);
@@ -2053,6 +2576,12 @@ function alertTick() {
     const mins = (new Date(m.start_at) - now) / 60000;
     if (mins <= 15 && mins > 10) once("m15:" + m.id, () => notify("In 15 min — " + m.title, fmtTime(m.start_at) + " · " + fmtTime(m.end_at), "mtg-" + m.id));
     if (mins <= 0 && mins > -3) once("m0:" + m.id, () => notify("Now — " + m.title, "until " + fmtTime(m.end_at), "mtg-" + m.id));
+  });
+  // tasks he set a time on: 5-min heads-up, then at the time
+  state.tasks.filter((t) => t.scheduled_date === today && !isDone(t) && timedMin(t) != null).forEach((t) => {
+    const at = timedMin(t), mins = at - nowMinutes();
+    if (mins <= 5 && mins > 0) once(`t5:${t.id}:${at}`, () => notify("In 5 min — " + t.title, fmtSpan(t, at) + " · " + (SIZE[t.size] || "1 hr"), "task-" + t.id));
+    if (mins <= 0 && mins > -3) once(`t0:${t.id}:${at}`, () => notify("Time for — " + t.title, fmtSpan(t, at), "task-" + t.id));
   });
   const h = new Date().getHours(), mn = new Date().getMinutes();
   // 7:00 — anything with a drop-dead today
@@ -2607,6 +3136,16 @@ function wire() {
   const bb = document.querySelector('#bucket-seg button[data-bucket="bills"]');
   if (bb) { bb.addEventListener("mouseenter", () => { if (!isPhone() && !billsMode()) openBillPeek(bb); }); bb.addEventListener("mouseleave", scheduleClosePeek); }
   $("view-seg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.view = b.dataset.view; localStorage.setItem("fm.view", state.view); state.mTop = null; if (state.view === "day" && state.selected) state.cursor = fromISO(state.selected); render(); });
+  // week-view buttons: built from WK_MODES so the name and the hover text live in one place
+  const wm = $("wk-modes");
+  if (wm) Object.entries(WK_MODES).forEach(([k, v]) => {
+    const b = el("button"); b.type = "button"; b.dataset.mode = k;
+    b.append(document.createTextNode(`${k} · ${v.name}`));
+    const tip = el("span", "tip"); tip.setAttribute("role", "tooltip");
+    tip.append(el("b", "", v.head), el("span", "", v.what), el("i", "", v.when));
+    b.append(tip); wm.append(b);
+  });
+  $("wk-modes")?.addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.wkMode = b.dataset.mode; localStorage.setItem("fm.wkmode", state.wkMode); if (state.wkMode === "2") state.wkRail = "tasks"; render({ now: true }); });
   $("prev-btn").addEventListener("click", () => shift(-1));
   $("next-btn").addEventListener("click", () => shift(1));
   $("today-btn").addEventListener("click", () => { state.cursor = new Date(); state.mJump = iso(firstOfMonth(state.cursor)); render(); });
