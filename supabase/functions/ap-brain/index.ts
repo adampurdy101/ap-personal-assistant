@@ -4,7 +4,7 @@
 // read/write the fm_tasks table AS THE LOGGED-IN USER (his JWT + anon key, RLS
 // applies), files everything, reshuffles within the rules, and returns what it did.
 // v5 (Nov 6, 2026): days off by voice — add_day_off / remove_day_off write all-day
-// PTO rows to fm_meetings (source pto); the app hatches those days on its own.
+// PTO rows to fm_meetings (source pto); the app marks those days (gold square + DAY OFF seal) on its own.
 //
 // SECURITY: ANTHROPIC_API_KEY lives only in Supabase Edge Function secrets.
 import Anthropic from "npm:@anthropic-ai/sdk";
@@ -108,7 +108,7 @@ const TOOLS: Anthropic.Tool[] = [
     description: "Change a bill (new amount, new due day, ended — pass ended_on as the last due date — autopay, account). Only the fields that change.",
     input_schema: { type: "object", properties: { id: { type: "number" }, name: { type: "string" }, amount: { type: "number" }, anchor_date: { type: "string" }, recur: { type: "string", enum: ["monthly", "biweekly", "yearly", "once"] }, domain: { type: "string" }, remind_days: { type: "number" }, autopay: { type: "boolean" }, account: { type: "string" }, notes: { type: "string" }, ended_on: { type: "string", description: "YYYY-MM-DD last due date it applies to; null = ongoing" } }, required: ["id"] },
   },
-  // ---- days off (all-day PTO rows in fm_meetings; the app hatches the day the moment the row lands) ----
+  // ---- days off (all-day PTO rows in fm_meetings; the app marks the day gold the moment the row lands) ----
   {
     name: "add_day_off",
     description: "Mark one day or a run of days as PTO / a day off (\"I'm taking Monday off\", \"PTO on the 9th\", \"out Friday\", \"sick today\", \"vacation Dec 14-18\"). NEVER add_task for a day off. Weekends are skipped (already off); days already off are left alone. After this, use day_load and move any WORK task off those days with update_task (one-line reason each).",
@@ -225,7 +225,7 @@ async function addDaysOff(db: DB, uid: string, input: { from?: string; to?: stri
   // what is sitting on those days — the model moves work off them
   const { data: sitting } = await db.from("fm_tasks").select("id,title,scheduled_date,size,bucket").is("deleted_at", null).neq("status", "done").gte("scheduled_date", from).lte("scheduled_date", to);
   const work = (sitting || []).filter((t: { bucket: string }) => t.bucket === "work");
-  const out = [added.length ? `Marked off (hatched in the app): ${added.join(", ")} — "${title}".` : "Nothing new to mark — those days were already off."];
+  const out = [added.length ? `Marked off (gold DAY OFF seal in the app): ${added.join(", ")} — "${title}".` : "Nothing new to mark — those days were already off."];
   if (skipped.length) out.push("Skipped: " + skipped.join("; "));
   if (work.length) out.push(`WORK tasks sitting on a day off — move each one with update_task (not past a drop-dead, not promised items): ` + work.map((t: { id: number; title: string; scheduled_date: string; size: string }) => `#${t.id} ${t.title} (${t.size}, on ${t.scheduled_date})`).join("; "));
   else out.push("No work tasks on those days.");
@@ -435,7 +435,7 @@ RULES
 12. Be plain and short. Your final reply is read on screen: 2-5 lines, what you filed and what you moved and why. No markdown headers, no fluff.
 13. BILLS live in the bill ledger, not in tasks: never add_task for a bill. "I paid X" / "X went through" → list_bills, then mark_bill_paid for that bill (the occurrence he means; default the latest unpaid). "I didn't pay X" → unmark_bill_paid. A new bill → add_bill (ask for the amount or due date only if he gave neither). Any question about bills, money due or past due → list_bills and answer from it. A bill is paid ONLY when Adam says so — never mark one paid because a date passed or an alert fired. Past-due bills are the first thing to mention when he asks how he is doing.
 14. DAYS OFF are never tasks. "I'm taking Monday off", "PTO on the 9th", "out Friday", "sick today", "vacation Dec 14-18", "mark the 9th as PTO" → add_day_off (never add_task). The app hatches that day the moment the row lands, exactly like the Japan trip and the company holidays, and the day drops to 0 hours. Then day_load for those days and move every WORK task off them with update_task, one-line reason each (home items can stay). "I'm working the 9th after all" / "cancel my PTO Friday" → remove_day_off. Company holidays cannot be removed. If a day off already exists as a task, remove_day_off is not needed — delete_task that task and add_day_off instead.
-15. WHAT YOU CONTROL: everything the calendar draws from — tasks, days off, bills, which meetings count. Hatched day = a day-off row; chip = a task; "?" = a guessed size. You do not pick colors or layout; if Adam asks for a look change, say that is done in a Claude chat and carry on with the filing. Never tell him to report something to "the app developer" — he and Claude are the developers. If you cannot do something, say exactly what in one line.`;
+15. WHAT YOU CONTROL: everything the calendar draws from — tasks, days off, bills, which meetings count. Gold day with the DAY OFF seal = a day-off row; chip = a task; "?" = a guessed size. You do not pick colors or layout; if Adam asks for a look change, say that is done in a Claude chat and carry on with the filing. Never tell him to report something to "the app developer" — he and Claude are the developers. If you cannot do something, say exactly what in one line.`;
 }
 
 Deno.serve(async (req) => {

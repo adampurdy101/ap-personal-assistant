@@ -575,7 +575,7 @@ function openDatePop(anchor, startISO, onPick) {
     p.append(grid);
     const foot = el("div", "dp-foot");
     const t = el("button", "btn sm", "Today"); t.type = "button"; t.addEventListener("click", () => { closeQuickFix(); onPick(todayISO()); });
-    foot.append(t, el("span", "hint", "hatched = day off · tan = weekend"));
+    foot.append(t, el("span", "hint", "gold = day off · olive = weekend"));
     p.append(foot);
   };
   draw();
@@ -1000,7 +1000,7 @@ function renderBrainPanel(r) {
         else if (a.kind === "bill_unpaid") line = `Un-paid: ${a.title}`;
         else if (a.kind === "bill_add") line = `New bill: ${a.title}`;
         else if (a.kind === "bill_update") line = `Changed bill: ${a.title}`;
-        else if (a.kind === "off_add") line = `Day off: ${a.to ? fmtShort(a.to) : ""} — ${a.title} (hatched on the calendar)`;
+        else if (a.kind === "off_add") line = `Day off: ${a.to ? fmtShort(a.to) : ""} — ${a.title} (gold DAY OFF seal on the calendar)`;
         else if (a.kind === "off_remove") line = `Work day again: ${a.from ? fmtShort(a.from) : ""} (was ${a.title})`;
         ul.append(el("li", "", line));
       });

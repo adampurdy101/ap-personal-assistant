@@ -30,7 +30,7 @@ is kept on the branch `look-v31` as the fallback.
 
 Calendar cells: week-number gutter down the left (current week red) · load bar at the bottom of
 every future workday (hours booked of 8, red when over) · `DD` corner tag on drop-dead days ·
-past days olive + dashed + faint red X + DONE · days off hatched with an OFF label · 7 px charcoal
+past days olive + dashed + faint red X + DONE · days off = gold square + round red DAY OFF seal, OFF label (v53, Adam's pick: mock 49 on 48's background) · 7 px charcoal
 bar where a month starts. Chips: hover shows ‹ › push-a-day arrows; drag and drop between days;
 a maroon "?" badge when size/priority are still guesses (click → 2-question popover).
 
@@ -172,5 +172,5 @@ fresh dump of the seed on any later day keeps the checks green. Needs `pip insta
 1. Calendar, panel, quick add + mic, Add task, brain, undo — done
 2. Scheduled runs (morning, end of day) — done
 3. Meetings on the calendar (Outlook feed direct, every 15 min) — done · days off — done
-4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint + PTO stripe color options
+4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Day-off look — done (v53: gold square + round seal in month, week, date picker and phone views; past days keep the olive X; ap-brain source wording updated, not yet redeployed, so the deployed brain still says "hatched"). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint options
 5. Phone-first polish
