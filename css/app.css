@@ -69,6 +69,16 @@ b, strong { font-weight: 700; }
 .mic:hover { background: #f6f1e6; }
 .mic.listening { background: #fff; outline: 2px solid var(--red); }
 .mic-icon { width: 20px; height: 20px; }
+/* Refresh: one press = fresh data + new-version check. The stamp says when it last pulled (wording, not color). */
+#refresh-btn { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; }
+#refresh-btn .rf-icon { width: 15px; height: 15px; flex: none; }
+#refresh-btn.busy .rf-icon { animation: rf-spin .8s linear infinite; }
+#refresh-btn .rf-stamp { font-weight: 400; font-size: 11px; color: var(--ink-2); white-space: nowrap; }
+#refresh-btn .rf-stamp:empty { display: none; }
+#refresh-btn.bad { border-color: var(--red); }
+#refresh-btn.bad .rf-stamp { color: var(--red); font-weight: 700; }
+@keyframes rf-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { #refresh-btn.busy .rf-icon { animation: none; } }
 .ver { font-size: 11px; color: var(--ink-3); letter-spacing: .04em; }
 
 /* ---------- layout: panel LEFT, calendar RIGHT, each in a charcoal frame ---------- */
@@ -445,6 +455,9 @@ body.mini-only #mini-root { display: block; }
   #quick-add, #tell-btn, #add-btn, #full-btn, #alerts-btn, #install-btn, #logout-btn, #view-seg, .ver, #mini-btn { display: none !important; }
   #bucket-seg { margin-left: auto; }
   #bucket-seg button { padding: 8px 12px; font-size: 14px; }
+  #refresh-btn { padding: 8px 9px; }
+  #refresh-btn .rf-word, #refresh-btn .rf-stamp { display: none; }
+  #refresh-btn .rf-icon { width: 18px; height: 18px; }
   .layout, .layout.wide { display: block; padding: 8px 8px 0; overflow: hidden; min-height: 0; }
   #cal { display: none !important; }
   .panel { height: calc(100dvh - 52px - env(safe-area-inset-top) - 64px - env(safe-area-inset-bottom)); max-height: none; border-width: 2px; border-radius: 10px; -webkit-overflow-scrolling: touch; }

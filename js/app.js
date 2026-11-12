@@ -102,7 +102,7 @@ async function loadAll() {
     db.from("fm_meetings").select("id,title,start_at,end_at,all_day,attending,day,updated_at,source").gte("day", from).lte("day", to).order("start_at"),
     loadBills(db),
   ]);
-  if (t.error) { toast("Load failed: " + t.error.message); return; }
+  if (t.error) { toast("Load failed: " + t.error.message); stampRefresh(false, "load failed"); return false; }
   if (!billsOk && !loadAll._billWarned) { loadAll._billWarned = true; toast("Bills didn't load: " + (B.error || "unknown")); }
   const rows = t.data || [];
   state.tasks = rows.filter((x) => !x.deleted_at);
@@ -115,6 +115,48 @@ async function loadAll() {
   purgeOldTrash();
   await carryForward();
   render();
+  stampRefresh(true);
+  return true;
+}
+
+// ---------- Refresh button: one press pulls everything fresh and checks for a new app version ----------
+// The app already follows changes live (realtime + wake + 30 s). This is the hard push for when Adam
+// wants to be sure: reload every table, reconnect the live channel, then look for newer app code.
+function stampRefresh(ok, msg) {
+  const b = $("refresh-btn"), s = $("refresh-stamp"); if (!b || !s) return;
+  b.classList.toggle("bad", !ok);
+  const at = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  s.textContent = ok ? `\u2713 ${at}` : `!! ${msg || "not updated"}`;
+  b.title = ok ? `Up to date as of ${at}. Press to pull everything fresh and check for a new app version.` : `Last refresh failed (${msg || "no connection"}). Press to try again.`;
+}
+async function hardRefresh() {
+  const b = $("refresh-btn"); if (!b || b.classList.contains("busy")) return;
+  b.classList.add("busy"); b.disabled = true;
+  try {
+    if (!navigator.onLine) { stampRefresh(false, "offline"); toast("!! Offline \u2014 showing what was last loaded"); return; }
+    refreshQueued = false; lastRefresh = Date.now();
+    const ok = await loadAll();
+    if (!ok) { stampRefresh(false, "load failed"); return; }
+    subscribe();
+    // newer app code? compare the version on the server with the one on screen
+    const mine = document.querySelector(".ver")?.textContent || "";
+    let theirs = "";
+    try {
+      const r = await fetch("index.html?fresh=" + Date.now(), { cache: "no-store" });
+      if (r.ok) theirs = ((await r.text()).match(/class="ver"[^>]*>(v\d+)</) || [])[1] || "";
+    } catch (e) {}
+    if (theirs && mine && theirs !== mine) {
+      toast(`New version ${theirs} \u2014 reloading`);
+      try { const reg = await navigator.serviceWorker?.getRegistration(); await reg?.update(); } catch (e) {}
+      setTimeout(() => location.reload(), 1200);
+      return;
+    }
+    toast(`\u2713 Up to date \u2014 ${mine || "latest version"}`);
+  } catch (e) {
+    stampRefresh(false, "error"); toast("!! Refresh failed: " + (e?.message || e));
+  } finally {
+    b.classList.remove("busy"); b.disabled = false;
+  }
 }
 
 // ---------- carry forward: nothing unfinished stays behind on a past day ----------
@@ -2582,6 +2624,7 @@ function wire() {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && !typing) { e.preventDefault(); undoLast(); }   // Ctrl+Z = undo the last change
   });
   initMic();
+  $("refresh-btn")?.addEventListener("click", hardRefresh);
   initFullscreen();
   initInstall();
   initAlerts();

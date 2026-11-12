@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..900&family=Roboto+Condensed:wght@400;700&display=swap">
-  <link rel="stylesheet" href="css/app.css?v=50">
+  <link rel="stylesheet" href="css/app.css?v=52">
 </head>
 <body>
 
@@ -56,11 +56,12 @@
       <button type="button" id="tell-btn" class="btn" title="Press and talk. Typed something in the box? Sends it."><svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg><span>Assistant</span></button>
 
       <button id="add-btn" class="btn" title="Add a task for today, tomorrow or any day">Add task</button>
+      <button type="button" id="refresh-btn" class="btn" title="Pull everything fresh right now and check for a new app version"><svg class="rf-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.3L4 9"/><polyline points="4 4 4 9 9 9"/><path d="M4 13a8 8 0 0 0 14.3 4.3L20 15"/><polyline points="20 20 20 15 15 15"/></svg><span class="rf-word">Refresh</span><span id="refresh-stamp" class="rf-stamp" aria-live="polite"></span></button>
       <button id="full-btn" class="btn" title="Full screen">Full screen</button>
       <button id="alerts-btn" class="btn ghost sm" title="Desktop pop-ups for meetings and nags">Alerts: off</button>
       <button id="install-btn" class="btn sm hidden" title="Run it in its own window">⬇ Install app</button>
       <button id="logout-btn" class="btn ghost sm" title="Sign out">Sign out</button>
-      <span class="ver" title="App version — tell Claude this number if the look seems stale">v51</span>
+      <span class="ver" title="App version — tell Claude this number if the look seems stale">v52</span>
     </header>
 
     <main class="layout" id="layout">
@@ -110,6 +111,6 @@
     <div id="toast" class="toast hidden"></div>
   </div>
 
-  <script type="module" src="js/app.js?v=50"></script>
+  <script type="module" src="js/app.js?v=52"></script>
 </body>
 </html>

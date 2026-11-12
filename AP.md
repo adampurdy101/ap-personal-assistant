@@ -172,5 +172,5 @@ fresh dump of the seed on any later day keeps the checks green. Needs `pip insta
 1. Calendar, panel, quick add + mic, Add task, brain, undo — done
 2. Scheduled runs (morning, end of day) — done
 3. Meetings on the calendar (Outlook feed direct, every 15 min) — done · days off — done
-4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint + PTO stripe color options
+4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Still to do: dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint + PTO stripe color options
 5. Phone-first polish
