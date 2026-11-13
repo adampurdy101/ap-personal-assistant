@@ -1,5 +1,5 @@
 // AP Personal Assistant service worker — network-first for app files, so updates land fast.
-const VERSION = "ap-v54";
+const VERSION = "ap-v55";
 const SHELL = ["./", "./index.html", "./css/app.css", "./js/app.js", "./js/auth.js", "./js/config.js", "./js/supabase.js", "./js/bills.js", "./manifest.webmanifest", "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -16,11 +16,19 @@ self.addEventListener("fetch", (e) => {
       .catch(() => caches.match(e.request))
   );
 });
+// Alerts stay up until Adam acts (v55). Pop-up buttons snooze; the X clears; a click on the body opens AP,
+// where the same alert is waiting as a card with Clear + Snooze 5 / 15 / 30.
+const tellApp = (msg) => self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => { list.forEach((c) => c.postMessage(msg)); return list; });
 self.addEventListener("notificationclick", (e) => {
+  const tag = e.notification.tag, min = e.action === "snooze5" ? 5 : e.action === "snooze15" ? 15 : 0;
   e.notification.close();
+  if (min) { e.waitUntil(tellApp({ type: "ap-alert", do: "snooze", tag, min })); return; }
   e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
     const main = list.find((c) => !c.url.includes("mini=1")) || list[0];
     if (main) return main.focus();
     return self.clients.openWindow("./");
   }));
+});
+self.addEventListener("notificationclose", (e) => {
+  e.waitUntil(tellApp({ type: "ap-alert", do: "clear", tag: e.notification.tag }));
 });

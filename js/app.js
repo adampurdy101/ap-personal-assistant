@@ -2558,11 +2558,91 @@ function syncAlertsBtn() {
   if (!("Notification" in window)) { b.textContent = "Alerts: n/a"; b.disabled = true; return; }
   b.textContent = alertsOn() ? "Alerts: on" : (Notification.permission === "denied" ? "Alerts: blocked" : "Alerts: off");
 }
-async function notify(title, body, tag) {
+// ---- sticky alerts (v55): every alert stays up until Adam clears it or snoozes it ----
+// One list drives both places an alert shows: the Windows corner pop-up (requireInteraction, two
+// snooze buttons — the most Chrome allows) and the card stack inside AP (Clear + Snooze 5 / 15 / 30).
+// An alert that sits uncleared chimes again every 2 minutes; a snoozed one comes back when its time is up.
+const SNOOZES = [5, 15, 30], CHIME_EVERY = 2 * 60 * 1000, LIVE_KEY = "fm.alerts.live";
+let liveAlerts = (() => { try { const d = todayISO(); return JSON.parse(localStorage.getItem(LIVE_KEY) || "[]").filter((a) => a.day === d); } catch { return []; } })();
+const saveLive = () => { try { localStorage.setItem(LIVE_KEY, JSON.stringify(liveAlerts)); } catch {} };
+let actx = null;
+function audioReady() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return false;
+    actx = actx || new AC();
+    if (actx.state === "suspended") actx.resume().catch(() => {});
+    return actx.state === "running";
+  } catch { return false; }
+}
+function chime() {   // two short tones; false when the browser has not let AP make sound yet
+  if (!audioReady()) return false;
+  const t = actx.currentTime;
+  [[880, 0], [660, 0.2]].forEach(([f, d]) => {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = "sine"; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.3, t + d + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.38);
+    o.connect(g); g.connect(actx.destination); o.start(t + d); o.stop(t + d + 0.42);
+  });
+  return true;
+}
+async function osShow(a, again) {
+  const played = chime();   // if AP's own chime played, the pop-up stays quiet; otherwise Windows makes the sound
+  const opts = { body: a.body, tag: a.tag, icon: "icons/icon.svg", badge: "icons/icon.svg", renotify: !!again, silent: played, requireInteraction: a.sticky !== false, data: { tag: a.tag } };
+  if (a.sticky !== false) opts.actions = [{ action: "snooze5", title: "Snooze 5 min" }, { action: "snooze15", title: "Snooze 15 min" }];
+  try { const reg = await navigator.serviceWorker.ready; await reg.showNotification(a.title, opts); }
+  catch { try { const o = { ...opts }; delete o.actions; new Notification(a.title, o); } catch {} }
+}
+async function osClose(tag) {
+  try { const reg = await navigator.serviceWorker.ready; (await reg.getNotifications({ tag })).forEach((n) => n.close()); } catch {}
+}
+function notify(title, body, tag, { sticky = true } = {}) {
   if (!alertsOn()) return;
-  const opts = { body, tag, icon: "icons/icon.svg", badge: "icons/icon.svg", renotify: false, silent: false };
-  try { const reg = await navigator.serviceWorker.ready; await reg.showNotification(title, opts); }
-  catch { try { new Notification(title, opts); } catch {} }
+  const a = { tag, title, body, day: todayISO(), at: Date.now(), last: Date.now(), until: 0, sticky };
+  if (sticky) { liveAlerts = liveAlerts.filter((x) => x.tag !== tag); liveAlerts.push(a); saveLive(); renderAlerts(); }
+  osShow(a, false);
+}
+function clearAlert(tag, { os = true } = {}) {
+  if (!liveAlerts.some((a) => a.tag === tag)) return;
+  liveAlerts = liveAlerts.filter((a) => a.tag !== tag); saveLive(); renderAlerts();
+  if (os) osClose(tag);
+}
+function snoozeAlert(tag, min) {
+  const a = liveAlerts.find((x) => x.tag === tag); if (!a) return;
+  a.until = Date.now() + min * 60000; saveLive(); renderAlerts(); osClose(tag);
+  toast(`Snoozed ${min} min — back at ${fmtTime(a.until)}`);
+}
+function alertPulse() {
+  const now = Date.now(); let changed = false;
+  liveAlerts.forEach((a) => {
+    if (a.until && now >= a.until) { a.until = 0; a.last = now; changed = true; osShow(a, true); }
+    else if (!a.until && now - a.last >= CHIME_EVERY) {
+      a.last = now; changed = true;
+      if (!(document.hasFocus() && chime())) osShow(a, true);   // looking at AP: chime only; otherwise pop it again
+    }
+  });
+  if (changed) { saveLive(); renderAlerts(); }
+}
+function renderAlerts() {
+  const host = $("alert-stack"); if (!host) return;
+  host.innerHTML = "";
+  const up = liveAlerts.filter((a) => !a.until), zz = liveAlerts.filter((a) => a.until);
+  host.classList.toggle("hidden", !liveAlerts.length);
+  up.forEach((a) => {
+    const c = el("div", "apal-card"); c.dataset.tag = a.tag;
+    const head = el("div", "apal-head"); head.append(el("span", "apal-mark", "!! ALERT"), el("span", "apal-when", fmtTime(a.at)));
+    const btns = el("div", "apal-btns");
+    const clr = el("button", "btn sm apal-clear", "✓ Clear"); clr.type = "button"; clr.addEventListener("click", () => clearAlert(a.tag));
+    btns.append(clr, el("span", "apal-lbl", "Snooze"));
+    SNOOZES.forEach((m) => { const b = el("button", "btn sm apal-snz", m + " min"); b.type = "button"; b.addEventListener("click", () => snoozeAlert(a.tag, m)); btns.append(b); });
+    c.append(head, el("div", "apal-title", a.title));
+    if (a.body) c.append(el("div", "apal-body", a.body));
+    c.append(btns); host.append(c);
+  });
+  zz.forEach((a) => {
+    const c = el("div", "apal-card apal-zz"); c.dataset.tag = a.tag;
+    const x = el("button", "btn sm apal-clear", "✓ Clear"); x.type = "button"; x.addEventListener("click", () => clearAlert(a.tag));
+    c.append(el("span", "apal-zzt", `zz Snoozed until ${fmtTime(a.until)} — ${a.title}`), x); host.append(c);
+  });
 }
 const firedKey = () => "fm.fired." + todayISO();
 const fired = () => { try { return new Set(JSON.parse(localStorage.getItem(firedKey()) || "[]")); } catch { return new Set(); } };
@@ -2613,13 +2693,22 @@ function initAlerts() {
     if (Notification.permission !== "granted") {
       const r = await Notification.requestPermission();
       if (r !== "granted") { syncAlertsBtn(); return; }
-      localStorage.setItem("fm.alerts", "on"); syncAlertsBtn(); notify("AP alerts are on", "Meetings 15 min ahead, nags, drop-deads.", "hello"); return;
+      localStorage.setItem("fm.alerts", "on"); syncAlertsBtn(); notify("AP alerts are on", "Alerts stay up until you Clear or Snooze them.", "hello", { sticky: false }); return;
     }
     localStorage.setItem("fm.alerts", alertsOn() ? "off" : "on"); syncAlertsBtn();
     toast(alertsOn() ? "Alerts on" : "Alerts off");
   });
   setInterval(alertTick, 60 * 1000);
   setTimeout(alertTick, 4000);
+  // sticky alerts: redraw what was still up, keep chiming / un-snoozing, and listen for the pop-up's buttons
+  renderAlerts();
+  setInterval(alertPulse, 15 * 1000);
+  ["pointerdown", "keydown"].forEach((ev) => window.addEventListener(ev, audioReady, { passive: true }));
+  if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (e) => {
+    const d = e.data || {}; if (d.type !== "ap-alert") return;
+    if (d.do === "snooze") snoozeAlert(d.tag, d.min);
+    else if (d.do === "clear") clearAlert(d.tag, { os: false });
+  });
 }
 
 // ---- mini mode: small always-on-top "today" window ----

@@ -168,6 +168,12 @@ Paid ✓ + Undo, the Bills view, add a bill, phone Bills tab) and drops screensh
 pinned to `FIXED_NOW` (Playwright's clock API) and the few task rows the checks click on are pinned in `PINS`, so a
 fresh dump of the seed on any later day keeps the checks green. Needs `pip install playwright` and a Chrome binary.
 
+## Sticky alerts (v55)
+- Every alert (`notify()` in js/app.js) goes on one list, `liveAlerts` (localStorage `fm.alerts.live`, today only), and shows in two places: the OS pop-up (`requireInteraction`, actions `snooze5` / `snooze15` — Chrome allows two) and the in-app card stack `#alert-stack` (`.apal-*` classes: Clear + Snooze 5 / 15 / 30).
+- `alertPulse()` runs every 15 s: an uncleared alert chimes again every 2 min (Web Audio chime; if the browser has not unlocked audio, the pop-up is re-shown with `renotify` so the OS makes the sound); a snoozed alert comes back when `until` passes.
+- sw.js: a pop-up button posts `{type:"ap-alert", do:"snooze", tag, min}` to the window; closing the pop-up posts `do:"clear"`; clicking its body focuses AP, where the card is still waiting.
+- Alerts only run while an AP window is open (minimized is fine). Test: `python3 test/alerts_test.py` (builds its own seed).
+
 ## Clock views (v54)
 - **Week** is an hour grid (6a–8p, opens on 7a, 56 px/h) with three ways to work it, picked with the `#wk-modes` buttons in the
   calendar header (built from `WK_MODES` in `js/app.js`; hover = when to use it; the pick is kept in `localStorage fm.wkmode`):
@@ -190,5 +196,5 @@ fresh dump of the seed on any later day keeps the checks green. Needs `pip insta
 1. Calendar, panel, quick add + mic, Add task, brain, undo — done
 2. Scheduled runs (morning, end of day) — done
 3. Meetings on the calendar (Outlook feed direct, every 15 min) — done · days off — done
-4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Day-off look — done (v53: gold square + round seal in month, week, date picker and phone views; past days keep the olive X; ap-brain source wording updated, not yet redeployed, so the deployed brain still says "hatched"). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Clock views — done (v54: week hour grid with Tray / Task list / Auto-fit, day grid + list, task times, meeting Remove + Hidden meetings). Still to do: the Assistant setting a time by voice (ap-brain `start_time`); dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint options
+4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Day-off look — done (v53: gold square + round seal in month, week, date picker and phone views; past days keep the olive X; ap-brain source wording updated, not yet redeployed, so the deployed brain still says "hatched"). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Clock views — done (v54: week hour grid with Tray / Task list / Auto-fit, day grid + list, task times, meeting Remove + Hidden meetings). Sticky alerts — done (v55: stay until Clear or Snooze 5 / 15 / 30, chime every 2 min). Still to do: the Assistant setting a time by voice (ap-brain `start_time`); dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint options
 5. Phone-first polish
