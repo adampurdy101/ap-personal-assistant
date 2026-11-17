@@ -297,18 +297,29 @@ async function refresh() {
   await loadAll();
 }
 
+// v57: taking the old channel down reports CLOSED to ITS callback. That used to schedule another subscribe(),
+// which took the new channel down, which reported CLOSED … a reconnect + full reload + redraw every 3 seconds,
+// forever, from the first Refresh press or network blip. Now a channel this function replaced is ignored, there
+// is one retry timer, and retries back off (3 s → 60 s) until a channel is up again.
 function subscribe() {
-  if (liveChannel) { try { db.removeChannel(liveChannel); } catch (e) {} }
-  liveChannel = db.channel("fm_tasks_live_" + Date.now())
+  clearTimeout(subscribe._retry);
+  const old = liveChannel; liveChannel = null;
+  if (old) { try { db.removeChannel(old); } catch (e) {} }
+  const ch = db.channel("fm_tasks_live_" + Date.now())
     .on("postgres_changes", { event: "*", schema: "public", table: "fm_tasks" }, () => refresh())
     .on("postgres_changes", { event: "*", schema: "public", table: "fm_meetings" }, () => { clearTimeout(subscribe._m); subscribe._m = setTimeout(refresh, 1500); })
     .on("postgres_changes", { event: "*", schema: "public", table: "fm_bill_payments" }, () => refresh())
     .on("postgres_changes", { event: "*", schema: "public", table: "fm_bills" }, () => refresh())
-    .on("postgres_changes", { event: "*", schema: "public", table: "fm_accounts" }, () => refresh())
-    .subscribe((status) => {
-      if (status === "SUBSCRIBED") refresh();
-      if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") setTimeout(subscribe, 3000);
-    });
+    .on("postgres_changes", { event: "*", schema: "public", table: "fm_accounts" }, () => refresh());
+  liveChannel = ch;
+  ch.subscribe((status) => {
+    if (ch !== liveChannel) return;   // a channel we took down on purpose: its CLOSED is not news
+    if (status === "SUBSCRIBED") { subscribe._wait = 0; refresh(); }
+    if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+      subscribe._wait = Math.min(60000, (subscribe._wait || 1500) * 2);
+      clearTimeout(subscribe._retry); subscribe._retry = setTimeout(subscribe, subscribe._wait);
+    }
+  });
 }
 
 // belt and braces: catch up when the tab wakes, the network returns, and every 30 s
@@ -791,8 +802,16 @@ function renderMonth(body) {
   const focus = firstOfMonth(state.cursor);
   const focusKey = monthKey(focus);
   const max = monthRows(focus) >= 6 ? 3 : 4;
-  const winStart = weekStart(new Date(focus.getFullYear(), focus.getMonth() - 12, 1));
-  const winEnd = new Date(focus.getFullYear(), focus.getMonth() + 13, 0);
+  let winStart = weekStart(new Date(focus.getFullYear(), focus.getMonth() - 12, 1));
+  let winEnd = new Date(focus.getFullYear(), focus.getMonth() + 13, 0);
+  // v57: the window is ±12 months around the month in focus, but he can scroll past that (rows are added as he
+  // goes). A redraw used to rebuild only the ±12 months, find the place he was at missing, and land back on the
+  // focus month — "it snaps me back". The window now always reaches the week he is looking at, with room around it.
+  if (!state.mJump && state.mTop) {
+    const at = fromISO(state.mTop.iso);
+    if (addDays(at, -7 * 12) < winStart) winStart = addDays(at, -7 * 12);
+    if (addDays(at, 7 * 18) > winEnd) winEnd = addDays(at, 7 * 18);
+  }
   const weeks = Math.ceil((daysBetween(iso(winStart), iso(winEnd)) + 1) / 7);
 
   const scroller = el("div", "mscroll");

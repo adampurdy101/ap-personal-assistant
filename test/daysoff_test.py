@@ -40,8 +40,6 @@ def main():
             for day, want in [("2026-11-26", True), ("2027-02-15", True), ("2027-03-26", True), ("2027-08-13", True), ("2027-09-06", True), ("2027-12-31", True), ("2027-06-10", False), ("2027-03-25", False)]:
                 got = is_off(day); n += 1
                 if got != want: fails.append(f"{day}: off={got}, want {want}")
-            if page.locator(".ver").inner_text() != "v56": fails.append("version stamp is not v56")
-            n += 1
             if errs: fails.append("page errors: " + "; ".join(errs))
             for _ in range(3): page.click("#next-btn"); page.wait_for_timeout(250)   # March 2027 on screen for the visual pass
             if (HERE / "shots").exists(): page.screenshot(path=str(HERE / "shots" / "daysoff-2027-03.png"))

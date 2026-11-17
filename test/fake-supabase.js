@@ -15,9 +15,18 @@ const tables = {
   fm_prefs: (seed.prefs || []).map((r) => ({ ...r })),
 };
 const log = [];
+const reads = {};   // how many SELECTs each table has answered — the checks use it to catch reload storms
+// Live channels behave like the real client where it matters: taking a channel down reports CLOSED to its own
+// callback (supabase-js does exactly that — it is what fed the 3-second reconnect loop fixed in v57).
+const live = { made: 0, removed: 0, open: [] };
 const maxId = (t) => Math.max(0, ...tables[t].map((r) => Number(r.id) || 0)) + 1;
 let nextId = { fm_tasks: maxId("fm_tasks"), fm_moves: 1, fm_meeting_rules: 1, fm_bills: maxId("fm_bills"), fm_accounts: maxId("fm_accounts"), fm_bill_payments: maxId("fm_bill_payments") };
-window.__FAKE = { tables, log, nextId };
+window.__FAKE = { tables, log, nextId, reads, live,
+  // a row changed on the server: tell every open channel that listens to that table
+  emit: (table) => live.open.slice().forEach((ch) => ch.hooks.filter((h) => h.table === table).forEach((h) => h.fn({ table }))),
+  // drop the connection: every open channel reports the status (CLOSED · CHANNEL_ERROR · TIMED_OUT)
+  drop: (status = "CHANNEL_ERROR") => live.open.slice().forEach((ch) => ch.cb && ch.cb(status)),
+};
 
 const cmp = (a, b) => (a == null && b == null ? 0 : a == null ? -1 : b == null ? 1 : a < b ? -1 : a > b ? 1 : 0);
 
@@ -46,6 +55,7 @@ class Builder {
     const t = this.table;
     if (!tables[t]) return { data: null, error: { message: "no such table " + t } };
     if (this.op === "select") {
+      reads[t] = (reads[t] || 0) + 1;
       const rows = this._rows().map((r) => ({ ...r }));
       if (this.wantSingle) return { data: rows[0] ?? null, error: rows.length || this.maybe ? null : { message: "no rows" } };
       return { data: rows, error: null };
@@ -105,6 +115,11 @@ export const db = {
     signInWithPassword: async () => ({ data: { session }, error: null }),
     signOut: async () => ({ error: null }),
   },
-  channel: () => ({ on() { return this; }, subscribe(cb) { if (cb) setTimeout(() => cb("SUBSCRIBED"), 0); return this; } }),
-  removeChannel: () => {},
+  channel: (name) => {
+    live.made++;
+    return { name, cb: null, hooks: [],
+      on(_type, filter, fn) { this.hooks.push({ table: filter && filter.table, fn }); return this; },
+      subscribe(cb) { this.cb = cb; live.open.push(this); if (cb) setTimeout(() => cb("SUBSCRIBED"), 0); return this; } };
+  },
+  removeChannel: (ch) => { live.removed++; live.open = live.open.filter((x) => x !== ch); if (ch && ch.cb) setTimeout(() => ch.cb("CLOSED"), 0); return Promise.resolve("ok"); },
 };
