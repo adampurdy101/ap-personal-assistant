@@ -104,13 +104,18 @@ async function loadAll() {
   const from = iso(addDays(new Date(), -45)), to = iso(addDays(new Date(), 120));
   const MCOLS = "id,title,start_at,end_at,all_day,attending,day,updated_at,source";
   const mtgQ = (cols) => db.from("fm_meetings").select(cols).gte("day", from).lte("day", to).order("start_at");
-  let [t, j, m, billsOk] = await Promise.all([
+  // Days off (PCG holidays, PTO) load with NO end date (v56): the meeting window stops 120 days out, and a
+  // holiday past it never drew — Adam scrolled to 2027 and saw no days off. A handful of rows a year.
+  const offQ = () => db.from("fm_meetings").select(MCOLS).in("source", [...OFF_SOURCES]).gt("day", to).order("start_at");
+  let [t, j, m, billsOk, off] = await Promise.all([
     db.from("fm_tasks").select("*").order("sort").order("created_at"),
     db.from("fm_jobs").select("*").eq("active", true).order("bucket").order("sort"),
     mtgQ(MCOLS + ",hidden"),
     loadBills(db),
+    offQ(),
   ]);
   if (m.error) m = await mtgQ(MCOLS);   // older database without the hidden column: still show the meetings
+  if (!m.error && !off.error && off.data) m.data = (m.data || []).concat(off.data);   // far-out days off join the list
   if (t.error) { toast("Load failed: " + t.error.message); stampRefresh(false, "load failed"); return false; }
   if (!billsOk && !loadAll._billWarned) { loadAll._billWarned = true; toast("Bills didn't load: " + (B.error || "unknown")); }
   const rows = t.data || [];
@@ -658,6 +663,7 @@ function dayCell(d, { other = false, max = 4, fit = 0 } = {}) {
   if (billsMode()) return billDayCell(d, { other, max, fit });
   const dISO = iso(d);
   const cell = el("div", "day");
+  cell.dataset.iso = dISO;
   if (other) cell.classList.add("other");
   if (d.getDay() === 0 || d.getDay() === 6) cell.classList.add("weekend");
   const isToday = dISO === todayISO();
