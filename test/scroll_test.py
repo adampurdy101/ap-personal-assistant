@@ -104,6 +104,9 @@ def main():
     t.eq(re.findall(r'css/app\.css\?v=(\d+)', html), [ver], "css/app.css?v= matches the corner stamp")
     t.eq(re.findall(r'js/app\.js\?v=(\d+)', html), [ver], "js/app.js?v= matches the corner stamp (or the browser keeps old code for 10 minutes)")
     t.eq(re.findall(r'const VERSION = "ap-v(\d+)"', sw), [ver], "sw.js VERSION matches the corner stamp")
+    left = [f.name for f in [REPO / "index.html", REPO / "sw.js", *sorted((REPO / "js").glob("*.js")), *sorted((REPO / "css").glob("*.css"))]
+            if re.search(r"^(<<<<<<<|>>>>>>>|=======$)", f.read_text(), flags=re.M)]
+    t.eq(left, [], "no merge markers left in a shipped file")
     return t.done()
 
 if __name__ == "__main__":

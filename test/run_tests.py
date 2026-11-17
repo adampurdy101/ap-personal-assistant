@@ -2,32 +2,27 @@
 """AP Personal Assistant — check-before-push harness.
 Serves a copy of the site with an in-memory Supabase double (fake-supabase.js), drives it in
 headless Chrome, asserts the real flows (done / remove / trash / undo / quick add / add panel /
-moves across weekends and PTO / drag / views / phone) and drops screenshots in shots/ for a visual
-pass. Run: python3 test/run_tests.py   (needs: pip install playwright, and a Chrome at CHROME below)"""
+moves across weekends and PTO / drag / views / phone / bills / clock views / meetings) and drops
+screenshots in shots/ for a visual pass. Run: python3 test/run_tests.py
+(needs: pip install playwright, and a Chrome at CHROME below)
+The rows come from synth_seed.py — made-up data, nothing personal, no dump from the database needed."""
 import os as _os
 CHROME = _os.environ.get("CHROME", "/usr/bin/google-chrome")
 import json, os, shutil, subprocess, sys, time, traceback
 from pathlib import Path
 from playwright.sync_api import sync_playwright
+from synth_seed import make_seed, T8
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 SITE = HERE / "site"
 SHOTS = HERE / "shots"
 PORT = 4173
-# The checks below are written against the seed as of this morning. The browser clock is pinned to it
-# (Playwright's clock API) so the harness keeps passing on any later day; re-dump the seed and move
-# this date together when the rows change.
+# The first block of checks runs on Tue Nov 3, 2026 (the browser clock is pinned with Playwright's clock API).
 FIXED_NOW = "2026-11-03T09:00:00-08:00"
-# seed.json = {"tasks": [...fm_tasks rows...], "jobs": [...fm_jobs rows...], "meetings": [...fm_meetings rows...]}
-# for the owner, dumped from Supabase (titles and dates only — it is gitignored, never commit it). One query:
-#   select json_build_object('tasks', (select json_agg(t) from fm_tasks t), 'jobs', (select json_agg(j) from fm_jobs j
-#   where active), 'meetings', (select json_agg(m) from fm_meetings m where day between current_date-45 and current_date+120));
-if not (HERE / "seed.json").exists():
-    sys.exit("test/seed.json is missing — dump it first (see the comment at the top of this file)")
-SEED = json.loads((HERE / "seed.json").read_text())
-# The live dump moves on every day (items get done, carried, moved). The rows the checks click on are
-# pinned back to the FIXED_NOW world here, so a fresh dump never breaks a check that is about the app.
+SEED = make_seed()
+# The rows the Nov 3 checks click on, put back the way that morning had them (synth_seed.py keeps them done so
+# the Nov 12 world stays clean).
 PINS = {
     8:  {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-03", "bucket": "home", "deleted_at": None},   # T3: on today, gets done + undone
     32: {"status": "not_started", "done_at": None, "scheduled_date": "2026-10-30", "bucket": "home", "carried": 0, "carried_from": None, "deleted_at": None},   # T7b: slipped, carried forward on load
@@ -35,7 +30,7 @@ PINS = {
     3:  {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-06", "bucket": "work", "deleted_at": None},   # T5: removed, restored
     33: {"status": "not_started", "done_at": None, "scheduled_date": "2026-11-07", "bucket": "home", "deleted_at": None},   # T12: a Home chip
 }
-RAW = json.loads(json.dumps(SEED))   # the dump as it is (no pins) — the clock checks run in the Nov 12 world
+RAW = json.loads(json.dumps(SEED))   # the rows as they are (no pins) — the clock checks run in the Nov 12 world
 for _row in SEED["tasks"]:
     if _row["id"] in PINS: _row.update(PINS[_row["id"]])
 
@@ -132,14 +127,17 @@ def main():
             t.name = "done"
             page, errors = new_page()
             chip = page.locator(".mscroll .day.today .chip[data-id='8']")
-            t.ok(chip.count() == 1, "Mom Medicaid chip is on today")
+            t.ok(chip.count() == 1, "task 8's chip is on today")
             chip.click(); page.wait_for_timeout(700)
             t.ok(page.locator("#rail-body .item[data-id='8'] .actions").count() >= 1, "day panel opened with the item expanded")
-            first = page.locator("#rail-body .sec").nth(1)
-            t.ok("pick" in (first.get_attribute("class") or "") and first.locator(".item[data-id='8']").count() == 1, "the clicked task is the FIRST card in the panel, outlined (Selected)")
-            t.ok(page.locator("#rail-body .sec.pick .lab").inner_text().lower().startswith("selected"), "Selected label on it")
-            t.ok(page.locator("#rail-body .sec", has_text="Also on this day").count() == 1, "the rest of the day sits under it")
-            t.eq(page.evaluate("document.getElementById('rail').scrollTop"), 0, "panel scrolled to the top")
+            # v59: the clicked task opens where it sits in the day's list — framed, tagged SELECTED, in view; nothing is pulled to the top
+            card = page.locator("#rail-body .item.picked[data-id='8']")
+            t.eq(card.count(), 1, "the clicked task is the open, framed card")
+            t.ok("SELECTED" in card.locator(".pick-tag").inner_text(), "it carries the SELECTED tab")
+            t.eq(page.locator("#rail-body .sec", has_text="Also on this day").count(), 0, "no separate 'Selected' / 'Also on this day' split any more")
+            t.eq(page.evaluate("[...document.querySelectorAll('#rail-body .item[data-id]')].map(c => Number(c.dataset.id))"), [8, 32], "the day's tasks stay in the day's order")
+            box = page.evaluate("(() => { const r = document.getElementById('rail').getBoundingClientRect(), c = document.querySelector('#rail-body .item.picked').getBoundingClientRect(); return [c.top >= r.top, c.bottom <= r.bottom]; })()")
+            t.eq(box, [True, True], "the whole card is in view in the panel")
             page.locator("#rail-body .item[data-id='8'] button", has_text="✓ Done").click(); page.wait_for_timeout(700)
             r = task(page, 8)
             t.eq(r["status"], "done", "db status done"); t.ok(bool(r["done_at"]), "done_at set")
@@ -165,6 +163,8 @@ def main():
 
             # ---------- T4 Remove (second click) → Trash → Put back → Delete for good ----------
             t.name = "trash"
+            t.eq(page.locator("#rail-body .item.picked").count(), 0, "Done closed the card (it does not hop to the end of the list while open)")
+            page.locator("#rail-body .item[data-id='8'] .head").click(); page.wait_for_timeout(500)
             page.locator("#rail-body .item[data-id='8'] button", has_text="✓ Done").click(); page.wait_for_timeout(700)
             chip = page.locator(".mscroll .day.today .chip[data-id='8']")
             chip.hover(); page.wait_for_timeout(500)
@@ -255,10 +255,10 @@ def main():
                 page.locator("#rail-body .item[data-id='%d'] button" % n["id"], has_text="Pick a day").click(); page.wait_for_timeout(600)
                 page.locator(".datepop .dp-day", has_text="13").first.click(); page.wait_for_timeout(700)
                 t.eq(task(page, n["id"])["scheduled_date"], "2026-11-13", "Pick a day → Fri Nov 13")
-                # +1 week from Fri Nov 13 = Fri Nov 20 = Japan PTO → lands on the first work day back, Mon Dec 7, and says why
+                # +1 week from Fri Nov 13 = Fri Nov 20 = PTO → lands on the first work day back, Mon Dec 7, and says why
                 open_task(n["id"])
                 page.locator("#rail-body .item[data-id='%d'] button" % n["id"], has_text="+1 week").click(); page.wait_for_timeout(700)
-                t.eq(task(page, n["id"])["scheduled_date"], "2026-12-07", "+1 week onto the Japan PTO lands Mon Dec 7")
+                t.eq(task(page, n["id"])["scheduled_date"], "2026-12-07", "+1 week onto the PTO lands Mon Dec 7")
                 t.ok("11/20" in toast_text(page) and "12/7" in toast_text(page), f"toast explains the landing: {toast_text(page)!r}")
             shot(page, "06-quick-add")
             t.eq(errors, [], f"no page errors in quick-add: {errors}")
@@ -268,7 +268,7 @@ def main():
             t.name = "land-day"
             def mods(s):
                 s["tasks"].append({"id": 900, "user_id": SEED["tasks"][0]["user_id"], "title": "Friday work thing", "notes": None, "bucket": "work", "priority": "normal", "status": "not_started", "waiting_on": None, "job": None, "size": "1h", "scheduled_date": "2026-11-06", "target_date": None, "dropdead_date": None, "planned": False, "promised_to": None, "nag_hours": 0, "source": "app", "done_at": None, "sort": 0, "created_at": "2026-11-03T00:00:00+00:00", "updated_at": "2026-11-03T00:00:00+00:00", "confirmed": True, "deleted_at": None})
-                s["tasks"].append({"id": 901, "user_id": SEED["tasks"][0]["user_id"], "title": "Tuesday before Japan", "notes": None, "bucket": "work", "priority": "normal", "status": "not_started", "waiting_on": None, "job": None, "size": "1h", "scheduled_date": "2026-11-17", "target_date": None, "dropdead_date": None, "planned": False, "promised_to": None, "nag_hours": 0, "source": "app", "done_at": None, "sort": 0, "created_at": "2026-11-03T00:00:00+00:00", "updated_at": "2026-11-03T00:00:00+00:00", "confirmed": True, "deleted_at": None})
+                s["tasks"].append({"id": 901, "user_id": SEED["tasks"][0]["user_id"], "title": "Tuesday before the trip", "notes": None, "bucket": "work", "priority": "normal", "status": "not_started", "waiting_on": None, "job": None, "size": "1h", "scheduled_date": "2026-11-17", "target_date": None, "dropdead_date": None, "planned": False, "promised_to": None, "nag_hours": 0, "source": "app", "done_at": None, "sort": 0, "created_at": "2026-11-03T00:00:00+00:00", "updated_at": "2026-11-03T00:00:00+00:00", "confirmed": True, "deleted_at": None})
                 s["tasks"].append({"id": 902, "user_id": SEED["tasks"][0]["user_id"], "title": "Old open thing", "notes": None, "bucket": "work", "priority": "high", "status": "not_started", "waiting_on": None, "job": None, "size": "1h", "scheduled_date": "2026-10-30", "target_date": None, "dropdead_date": None, "planned": False, "promised_to": None, "nag_hours": 0, "source": "app", "done_at": None, "sort": 0, "created_at": "2026-10-03T00:00:00+00:00", "updated_at": "2026-10-03T00:00:00+00:00", "confirmed": True, "deleted_at": None})
             page, errors = new_page(seed_variant(mods))
             page.locator(".mscroll .chip[data-id='900']").click(); page.wait_for_timeout(700)
@@ -281,13 +281,13 @@ def main():
             page.locator(".mscroll .chip[data-id='901']").click(); page.wait_for_timeout(700)
             page.locator("#rail-body .item[data-id='901'] button", has_text="+1 week").click(); page.wait_for_timeout(700)
             t.eq(task(page, 901)["scheduled_date"], "2026-12-07", "+1 week onto PTO lands on the first work day back (Dec 7)")
-            t.ok("PTO" in toast_text(page) or "Japan" in toast_text(page), f"toast explains the landing: {toast_text(page)!r}")
+            t.ok("PTO" in toast_text(page), f"toast explains the landing: {toast_text(page)!r}")
             # carry forward: the open item left on Oct 30 is on today now, counted as one slip
             r = task(page, 902)
             t.eq(r["scheduled_date"], "2026-11-03", "open past item carried to today on load")
             t.eq(r["carried"], 1, "carried count = 1"); t.eq(r["carried_from"], "2026-10-30", "remembers the day it was first due")
             t.ok(r["planned"] is False, "carried item is real, not planned")
-            t.eq(task(page, 32)["scheduled_date"], "2026-11-03", "the real slipped Home item (Withdraw $6,500) came forward too")
+            t.eq(task(page, 32)["scheduled_date"], "2026-11-03", "the slipped Home item came forward too")
             badge = page.locator(".mscroll .day.today .chip[data-id='902'] .carry")
             t.ok(badge.count() == 1 and badge.inner_text() == "↻1", f"↻1 badge on the carried chip: {badge.all_inner_texts()}")
             t.ok(any(m["kind"] == "move" and m["batch_id"].startswith("carry-") and m["task_id"] == 902 and "Carried forward" in m["reason"] for m in fake(page)["moves"]), "carry logged with a reason")
@@ -295,7 +295,7 @@ def main():
             done_stamps = page.evaluate("[...document.querySelectorAll('.mscroll .day.past .stamp:not(.open)')].length")
             t.ok(done_stamps > 10, "past days stamped DONE")
             page.locator(".mscroll .day.today .chip[data-id='902']").click(); page.wait_for_timeout(700)
-            t.ok("Carried" in page.locator("#rail-body .sec.pick .status-pill").first.inner_text(), "status pill says Carried ×1")
+            t.ok("Carried" in page.locator("#rail-body .item.picked .status-pill").first.inner_text(), "status pill says Carried ×1")
             # a second load must not carry it again (same day)
             page.reload(wait_until="load"); page.wait_for_selector(".mweek", state="attached"); page.wait_for_timeout(900)
             t.eq(task(page, 902)["carried"], 1, "reload does not double-count the carry")
@@ -338,14 +338,14 @@ def main():
             t.ok("Undo" in toast_text(page), "popover save can be undone")
             page.locator(".mscroll .day.today .chip[data-id='8']").click(); page.wait_for_timeout(600)
             page.locator("#rail-body .item[data-id='8'] button", has_text="Edit").click(); page.wait_for_timeout(600)
-            page.fill("#rail-body form.form input[name='title']", "Get Mom enrolled in Medicaid — call DSHS")
+            page.fill("#rail-body form.form input[name='title']", T8 + " (edited)")
             page.locator("#rail-body form.form button", has_text="Save").click(); page.wait_for_timeout(700)
-            t.eq(task(page, 8)["title"], "Get Mom enrolled in Medicaid — call DSHS", "edit form saved the title")
+            t.eq(task(page, 8)["title"], T8 + " (edited)", "edit form saved the title")
             page.keyboard.press("Escape"); page.wait_for_timeout(600)
             lab = page.locator("#rail-body .row.undo .ulab").inner_text()
             t.ok(lab.startswith("Edit"), f"Status card shows the last change: {lab!r}")
             page.locator("#rail-body .row.undo button").click(); page.wait_for_timeout(700)
-            t.eq(task(page, 8)["title"], "Get Mom enrolled in Medicaid — she runs out of money end of Sept", "Status-card Undo reverts the edit")
+            t.eq(task(page, 8)["title"], T8, "Status-card Undo reverts the edit")
             t.eq(errors, [], f"no page errors in quickfix-edit: {errors}")
             page.context.close()
 
@@ -433,9 +433,9 @@ def main():
             chip = page.locator(".mscroll .day:not(.other) .bchip.st-late").first
             bid, due = chip.get_attribute("data-bill"), chip.get_attribute("data-due")
             chip.click(); page.wait_for_timeout(700)
-            t.eq(page.locator("#rail-body .sec.pick .item.bill").count(), 1, "clicked bill opens first in the panel (Selected card)")
+            t.eq(page.locator(f"#rail-body .item.bill.picked[data-bill='{bid}']").count(), 1, "the clicked bill is the framed SELECTED card in the day's list")
             shot(page, "13-bills-day")
-            page.locator("#rail-body .sec.pick button", has_text="Paid").first.click(); page.wait_for_timeout(800)
+            page.locator("#rail-body .item.bill.picked button", has_text="Paid").first.click(); page.wait_for_timeout(800)
             d = bills(page)
             t.ok(any(p["bill_id"] == int(bid) and p["due_date"] == due for p in d["pays"]), "Paid ✓ in the panel saves bill_id + due_date")
             t.eq(page.locator(f".mscroll .bchip.st-paid[data-bill='{bid}'][data-due='{due}']").count(), 1, "that chip now shows ✓ paid")

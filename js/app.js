@@ -58,7 +58,8 @@ const state = {
   cursor: new Date(),                                    // which month/week/day we're looking at
   selected: null,                                        // ISO date opened in the rail
   panel: null,                                           // 'day' | 'unscheduled' | 'tomorrow' | null
-  openId: null,                                          // expanded task id
+  open: [],                                              // cards open in the panel, by key ("card:12" = its card in a day / inbox list, "today:12" = that row of the overview…). Last = the SELECTED one
+  billOpenAt: [],                                        // bill rows open in place in the Bills panel ("late:3:2026-11-01")
   editId: null,                                          // task in edit mode
   tasks: [],                                             // live rows (deleted_at is null) — done ones included
   trash: [],                                             // removed rows (deleted_at set); Put back brings them home
@@ -80,6 +81,18 @@ const state = {
   acctDraft: null,                                       // Accounts panel form
   feedToken: null,                                       // Apple Calendar feed token (fm_prefs), loaded on demand
 };
+// v59 — open cards. Clicking a task opens it where it sits and NEVER closes another one: a card that closed above
+// it would pull the one he just clicked out from under the mouse. Click an open card's header to close it; Done,
+// a move, Esc and leaving the screen close them too. The last one opened carries the blue frame + SELECTED tab.
+// state.openId stays the handle the older code uses: read = the selected task, write = "only this one" / "none".
+const keyTask = (k) => Number(k.slice(k.lastIndexOf(":") + 1));
+const isOpenKey = (k) => state.open.includes(k);
+const selKey = () => state.open[state.open.length - 1] || null;
+const closeTask = (id) => { state.open = state.open.filter((k) => keyTask(k) !== id); };
+Object.defineProperty(state, "openId", {
+  get: () => { const k = selKey(); return k ? keyTask(k) : null; },
+  set: (v) => { state.open = v == null ? [] : ["card:" + v]; },
+});
 // ---------- phone: one screen at a time, bottom tabs ----------
 const PHONE_MQ = window.matchMedia("(max-width: 740px), ((pointer: coarse) and (max-height: 520px))");
 const isPhone = () => PHONE_MQ.matches;
@@ -100,13 +113,29 @@ function toast(msg, { undo: withUndo = false, ms = null } = {}) {
 
 // ---------- data ----------
 const TRASH_DAYS = 30;   // removed items wait this long in the Trash, then go for good
-async function loadAll() {
+// One load at a time (v59). Everyone who asks while a load is in flight shares ONE follow-up pass, so a
+// burst of triggers (live channel + window focus + the 30 s check) costs two loads, not six.
+let loadRun = null, loadNext = null, loadForce = false;
+function loadAll({ force = false } = {}) {
+  if (force) loadForce = true;   // the caller changed something only a redraw shows (Assistant reply, Refresh button)
+  if (!loadRun) { loadRun = loadOnce().finally(() => { loadRun = null; }); return loadRun; }
+  if (!loadNext) loadNext = loadRun.catch(() => {}).then(() => { loadNext = null; return loadAll(); });
+  return loadNext;
+}
+// What the screen is drawn from, as one string — to tell "the server sent the same thing" from a real change.
+// A bill photo counts by its size and tail, not its megabyte of text.
+const dataSig = (d) => JSON.stringify(d, (k, v) => (k === "photo" && typeof v === "string" ? v.length + ":" + v.slice(-24) : v));
+const billSnap = () => ({ bills: B.bills, accounts: B.accounts, payments: B.payments, loaded: B.loaded, error: B.error });
+// Month view on the desktop only changes with the date; the clock views and the phone show the time, so they follow the minute.
+const timeKey = () => todayISO() + (state.view === "month" && !isPhone() && !MINI_ONLY ? "" : " " + Math.floor(Date.now() / 60000));
+async function loadOnce() {
   const from = iso(addDays(new Date(), -45)), to = iso(addDays(new Date(), 120));
   const MCOLS = "id,title,start_at,end_at,all_day,attending,day,updated_at,source";
   const mtgQ = (cols) => db.from("fm_meetings").select(cols).gte("day", from).lte("day", to).order("start_at");
   // Days off (PCG holidays, PTO) load with NO end date (v56): the meeting window stops 120 days out, and a
   // holiday past it never drew — Adam scrolled to 2027 and saw no days off. A handful of rows a year.
   const offQ = () => db.from("fm_meetings").select(MCOLS).in("source", [...OFF_SOURCES]).gt("day", to).order("start_at");
+  const wasBillSig = dataSig(billSnap());   // loadBills writes straight into B — remember what the screen was drawn from
   let [t, j, m, billsOk, off] = await Promise.all([
     db.from("fm_tasks").select("*").order("sort").order("created_at"),
     db.from("fm_jobs").select("*").eq("active", true).order("bucket").order("sort"),
@@ -119,20 +148,49 @@ async function loadAll() {
   if (t.error) { toast("Load failed: " + t.error.message); stampRefresh(false, "load failed"); return false; }
   if (!billsOk && !loadAll._billWarned) { loadAll._billWarned = true; toast("Bills didn't load: " + (B.error || "unknown")); }
   const rows = t.data || [];
-  state.tasks = rows.filter((x) => !x.deleted_at);
-  state.trash = rows.filter((x) => !!x.deleted_at).sort((a, b) => String(b.deleted_at).localeCompare(String(a.deleted_at)));
-  state.jobs = j.data || [];
+  const next = {
+    tasks: rows.filter((x) => !x.deleted_at),
+    trash: rows.filter((x) => !!x.deleted_at).sort((a, b) => String(b.deleted_at).localeCompare(String(a.deleted_at))),
+    jobs: j.data || [],
+    meetings: state.meetings, hiddenMeetings: state.hiddenMeetings,
+  };
   if (!m.error) {
     const all = m.data || [];
-    state.meetings = all.filter((x) => !x.hidden);
-    state.hiddenMeetings = all.filter((x) => x.hidden);
-    state.meetingsSync = all.reduce((a, x) => (x.updated_at > a ? x.updated_at : a), "") || null;
+    next.meetings = all.filter((x) => !x.hidden);
+    next.hiddenMeetings = all.filter((x) => x.hidden);
   }
+  // Redraw only when something on screen would change (v59). A redraw rebuilds the whole calendar; doing that
+  // for identical data on every check cut into scrolling, dragging and anything else he was in the middle of.
+  // When nothing changed the task and meeting rows he is looking at stay the SAME objects, so every button keeps pointing at live data.
+  const now = { tasks: state.tasks, trash: state.trash, jobs: state.jobs, meetings: state.meetings, hiddenMeetings: state.hiddenMeetings };
+  const force = loadForce; loadForce = false;
+  const same = !force && loadOnce._drawn && timeKey() === loadOnce._key && dataSig(next) === dataSig(now) && dataSig(billSnap()) === wasBillSig;
+  if (same) {   // tasks and meetings keep their objects; the bill rows are the fresh copies (every bill button looks its bill up by id)
+    if (await carryForward()) render(); else tickClock();
+    stampRefresh(true);
+    return true;
+  }
+  Object.assign(state, next);
+  state.meetingsSync = state.meetings.concat(state.hiddenMeetings).reduce((a, x) => (x.source === "pci_outlook" && x.updated_at > a ? x.updated_at : a), "") || null;
   purgeOldTrash();
   await carryForward();
+  loadOnce._drawn = true; loadOnce._key = timeKey();
   render();
   stampRefresh(true);
   return true;
+}
+// The clock on the Today card moves without a redraw: the time line and the "Now …" text are the only things
+// on the month screen that change with the minute.
+const nowLabel = () => `Now ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).replace(" AM", "").replace(" PM", "")} · ${workLeftText()}`;
+function tickClock() {
+  const txt = document.querySelector("#rail-body .tl .tlnow"), bar = document.querySelector("#rail-body .tl .tlbar");
+  if (txt) txt.textContent = nowLabel();
+  if (!bar) return;
+  const span = (DAY_END - DAY_START) * 60, nm = nowMinutes() - DAY_START * 60;
+  let mark = bar.querySelector("i.now");
+  if (nm < 0 || nm > span) { mark?.remove(); return; }
+  if (!mark) { mark = el("i", "now"); bar.append(mark); }
+  mark.style.left = (nm / span * 100) + "%";
 }
 
 // ---------- Refresh button: one press pulls everything fresh and checks for a new app version ----------
@@ -151,7 +209,7 @@ async function hardRefresh() {
   try {
     if (!navigator.onLine) { stampRefresh(false, "offline"); toast("!! Offline \u2014 showing what was last loaded"); return; }
     refreshQueued = false; lastRefresh = Date.now();
-    const ok = await loadAll();
+    const ok = await loadAll({ force: true });
     if (!ok) { stampRefresh(false, "load failed"); return; }
     subscribe();
     // newer app code? compare the version on the server with the one on screen
@@ -182,7 +240,7 @@ async function hardRefresh() {
 async function carryForward() {
   const today = todayISO();
   const late = state.tasks.filter((t) => !isDone(t) && t.scheduled_date && t.scheduled_date < today);
-  if (!late.length) return;
+  if (!late.length) return 0;
   const moved = [];
   for (const t of late) {
     const to = t.bucket === "work" ? landDay(today, "work") : today;
@@ -198,9 +256,10 @@ async function carryForward() {
     db.from("fm_moves").insert({ batch_id: "carry-" + today, kind: "move", task_id: t.id, before, after: patch, reason: `Carried forward — not finished on ${fmtShort(from)}`, from_date: from, to_date: to }).then(() => {}, () => {});
     moved.push(t);
   }
-  if (!moved.length) return;
+  if (!moved.length) return 0;
   const days = [...new Set(moved.map((t) => fmtShort(t.carried_from)))].slice(0, 3).join(", ");
   toast(`Carried ${moved.length} unfinished item${moved.length === 1 ? "" : "s"} forward to today (from ${days})`, { ms: 7000 });
+  return moved.length;
 }
 
 // once per session: anything that has sat in the Trash past TRASH_DAYS goes for good
@@ -235,7 +294,7 @@ const whenShort = (ts) => ts ? new Date(ts).toLocaleString("en-US", { weekday: "
 function placeRow(t) {
   state.tasks = state.tasks.filter((x) => x.id !== t.id);
   state.trash = state.trash.filter((x) => x.id !== t.id);
-  if (t.deleted_at) { state.trash.unshift(t); if (state.openId === t.id) state.openId = null; }
+  if (t.deleted_at) { state.trash.unshift(t); closeTask(t.id); }
   else state.tasks.push(t);
 }
 
@@ -244,8 +303,11 @@ async function patchTask(t, patch, { kind = "update", reason = "", label = null,
   const before = {}; for (const k of Object.keys(patch)) before[k] = t[k] ?? null;
   const { error } = await db.from("fm_tasks").update(patch).eq("id", t.id);
   if (error) { toast("Save failed: " + error.message); return false; }
+  // a button or popover drawn before the last data change may still hold the old copy of this row — change the live one too
+  const live = state.tasks.find((x) => x.id === t.id) || state.trash.find((x) => x.id === t.id) || t;
+  if (live !== t) Object.assign(live, patch);
   Object.assign(t, patch);
-  if ("deleted_at" in patch) placeRow(t);
+  if ("deleted_at" in patch) placeRow(live);
   logApp(kind, t, before, patch, reason);
   if (undoable && label) pushUndo(label, () => patchTask(t, before, { kind: "undo", reason: "Undo: " + label, undoable: false }));
   render();
@@ -289,10 +351,14 @@ function userIsTyping() {
   return !!a && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && a.type !== "checkbox" && a.value));
 }
 
+// v59: a minimized / background window used to stop loading altogether, so its alerts ran on old data — a meeting
+// added after he minimized AP never rang. It now keeps loading, at a slow pace (at most once a minute; the 30 s
+// check drops to every 5 minutes), and catches up at once when he comes back.
+let bgDue = false;
 async function refresh() {
-  if (document.hidden) return;
   if (userIsTyping()) { refreshQueued = true; return; }
-  refreshQueued = false;
+  if (document.hidden && Date.now() - lastRefresh < 60000) { bgDue = true; return; }
+  refreshQueued = false; bgDue = false;
   lastRefresh = Date.now();
   await loadAll();
 }
@@ -326,7 +392,7 @@ function subscribe() {
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 window.addEventListener("focus", () => refresh());
 window.addEventListener("online", () => { subscribe(); refresh(); });
-setInterval(() => { if (!document.hidden && (Date.now() - lastRefresh) > 25000) refresh(); }, 30000);
+setInterval(() => { const idle = Date.now() - lastRefresh; if (document.hidden ? (bgDue && idle >= 60000) || idle > 5 * 60000 : idle > 25000) refresh(); }, 30000);
 setInterval(() => { if (refreshQueued && !userIsTyping()) refresh(); }, 2000);
 
 // ---------- derived ----------
@@ -401,6 +467,7 @@ async function moveTask(t, toISO, reason, { ask = true } = {}) {
   const from = t.scheduled_date;
   const patch = { scheduled_date: toISO, planned: false };
   if (t.start_at) patch.start_at = null;   // a new day starts with no time — set one there if it needs it
+  if (state.editId !== t.id) closeTask(t.id);   // it is leaving this spot: close its card
   const ok = await patchTask(t, patch, { kind: "move", reason, label: `Move "${t.title}" ${from ? fmtShort(from) : "inbox"} → ${fmtShort(toISO)}` });
   return ok;
 }
@@ -508,13 +575,17 @@ function render(opts) {
     clearTimeout(M.pending); M.pending = setTimeout(render, 450); return;
   }
   clearTimeout(M.pending); M.pending = null;
+  render.count = (render.count || 0) + 1;
   renderTop();
   if (MINI_ONLY) { renderMini($("mini-root")); updateBadge(); return; }
   document.body.classList.toggle("phone", isPhone());
   if (isPhone()) { renderPhone(); updateBadge(); return; }
   renderCalendar();
   renderRail();
-  $("layout").classList.toggle("wide", !!state.panel);
+  const lay = $("layout"), widthChange = lay.classList.contains("wide") !== !!state.panel;
+  lay.classList.toggle("wide", !!state.panel);
+  clearTimeout(render._settle);   // the panel slides to its new width in 0.18 s: the card opened from the calendar is placed again once it has settled
+  if (widthChange && showPicked.jumped) render._settle = setTimeout(() => { state.panelJump = "jump"; const r = $("rail"); if (r) showPicked(r); }, 260);
   renderMini();
   updateBadge();
 }
@@ -771,7 +842,7 @@ const firstOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
 const monthRows = (m) => Math.ceil((m.getDay() + new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate()) / 7);
 const sameMonth = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
 const monthKey = (d) => `${d.getFullYear()}-${d.getMonth()}`;
-const M = { scroller: null, head: null, first: null, last: null, lastScroll: 0, pending: null, fit: 0 };
+const M = { scroller: null, head: null, first: null, last: null, lastScroll: 0, pending: null, fit: 0, gliding: 0 };
 const LINE_PX = 23, CELL_CHROME = 42;   // one chip/meeting line · number row + load bar + padding
 const fitFor = (rowh) => Math.max(1, Math.floor((rowh - CELL_CHROME) / LINE_PX));
 
@@ -839,11 +910,14 @@ function renderMonth(body) {
   } else {
     const r = rowFor(state.mJump || iso(focus));
     if (r) {
-      if (state.mJumpSmooth && state.mPrevTop != null) scroller.scrollTop = state.mPrevTop;
-      scroller.scrollTo({ top: r.offsetTop - head.offsetHeight, behavior: state.mJumpSmooth ? "smooth" : "auto" });
+      // v59: ‹ › glide from the week he was on. The start used to be the old pixel offset, which points at a different
+      // week once the window is rebuilt around the new month — the grid flashed two months ahead and ran backwards.
+      const target = r.offsetTop - head.offsetHeight, was = state.mJumpSmooth && state.mPrev ? rowFor(state.mPrev.iso) : null;
+      if (was) { scroller.scrollTop = was.offsetTop - head.offsetHeight + Math.min(state.mPrev.off, was.offsetHeight); M.gliding = Date.now(); scroller.scrollTo({ top: target, behavior: "smooth" }); }
+      else scroller.scrollTop = target;
     }
   }
-  state.mJump = null; state.mJumpSmooth = false; state.mPrevTop = null;
+  state.mJump = null; state.mJumpSmooth = false; state.mPrev = null;
 
   let ticking = false;
   scroller.addEventListener("scroll", () => { M.lastScroll = Date.now(); if (!ticking) { ticking = true; requestAnimationFrame(() => { ticking = false; monthOnScroll(); }); } }, { passive: true });
@@ -867,7 +941,7 @@ function monthOnScroll() {
   const probeIdx = Math.min(rows.length - 1, Math.floor((top - firstTop + (sc.clientHeight - head.offsetHeight) / 3) / rowH));
   const f = firstOfMonth(addDays(fromISO(rows[probeIdx].dataset.start), 3));
   const focus = firstOfMonth(state.cursor);
-  setPeek(sameMonth(f, focus) ? null : f);
+  setPeek(sameMonth(f, focus) || Date.now() - (M.gliding || 0) < 700 ? null : f);   // no "viewing …" note flashing by while ‹ › glides to the month
 
   // Running out of weeks? Add more rows — no rebuild, no jump.
   const max = monthRows(focus) >= 6 ? 3 : 4, key = monthKey(focus), ADD = 12;
@@ -1154,13 +1228,15 @@ function renderWeek(body) {
 const DOW_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 // a task as a row with its time and the buttons to act on it (Day view list · Task list panel)
-function timeRow(t, dISO, { push = false } = {}) {
+function timeRow(t, dISO, { push = false, at = null } = {}) {
+  const here = at ? `${at}:${t.id}` : null;
+  if (here && isOpenKey(here)) return itemCard(t, here);
   const done = isDone(t), tm = timedMin(t);
   const row = el("div", "trow" + (t.bucket === "home" && state.bucket === "both" ? " bucket-home" : "") + (done ? " is-done" : ""));
-  row.dataset.id = t.id;
+  row.dataset.id = t.id; if (here) row.dataset.at = here;
   const title = el("div", "tr-title"); title.append(el("b", "sym", done ? "✓" : PRI[t.priority].mark), document.createTextNode(t.title));
-  title.title = tooltip(t) + " · click to open it";
-  title.addEventListener("click", () => openDay(dISO, t.id));
+  title.title = tooltip(t) + (here ? " · click to open it right here" : " · click to open it");
+  title.addEventListener("click", () => here ? toggleKey(here, row) : openDay(dISO, t.id));
   const meta = el("div", "tr-meta");
   const when = el("span", "tr-when" + (tm != null ? " set" : ""), tm != null ? fmtSpan(t, tm) : "no time yet");
   meta.append(when, el("span", "tr-size", SIZE[t.size] || "1 hr"));
@@ -1212,6 +1288,8 @@ function renderDay(body) {
   cols.append(side);
   wrap.append(cols);
   body.append(wrap);
+  if (state.dvTop && state.dvTop.d === dISO) side.scrollTop = state.dvTop.top;   // same day as before the redraw: the list stays where he had it
+  side.addEventListener("scroll", () => { if (side.isConnected) state.dvTop = { d: dISO, top: side.scrollTop }; }, { passive: true });
 }
 
 // Task list view of the week (left panel): every day's tasks with Set time right on the row
@@ -1225,7 +1303,7 @@ function renderWeekTasks(r) {
     const d = fromISO(dISO);
     const sec = card(r, `${dISO === todayISO() ? "Today · " : ""}${d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}`, { sub: `${open.length} open${nDone ? ` · ${nDone} done` : ""}`, cls: dISO === todayISO() ? "wt-today" : "" });
     if (!open.length) sec.append(el("div", "empty", nDone ? "All done for today." : "Nothing open today."));
-    open.forEach((t) => sec.append(timeRow(t, dISO)));
+    open.forEach((t) => sec.append(timeRow(t, dISO, { at: "wk" })));
   }
   if (!any) { const sec = card(r, "This week"); sec.append(el("div", "empty", "Nothing on this week yet.")); }
   const wkDone = [...Array(7)].reduce((a, _, i) => a + tasksOn(iso(addDays(s, i))).filter(isDone).length, 0);
@@ -1233,7 +1311,7 @@ function renderWeekTasks(r) {
   const inbox = unscheduled();
   const sI = card(r, `No day yet · ${inbox.length}`);
   if (!inbox.length) sI.append(el("div", "empty", "Inbox is empty."));
-  inbox.slice(0, 6).forEach((t) => rowFor(sI, t));
+  inbox.slice(0, 6).forEach((t) => rowFor(sI, t, { at: "wkinbox" }));
   if (inbox.length > 6) { const m = el("div", "row link", `+${inbox.length - 6} more — open the inbox`); m.addEventListener("click", () => openUnscheduled()); sI.append(m); }
 }
 
@@ -1403,8 +1481,50 @@ function renderHiddenPanel(r) {
 }
 
 // ---------- rail ----------
-function renderRail() {
-  const r = $("rail-body");
+// v59 — the panel never moves under him. A redraw of the SAME screen keeps the scroll place; a new screen starts
+// at its top; a task opened from the calendar is brought into view; a task opened in the panel expands right
+// where it sits (only a nudge if its buttons would fall below the edge).
+const railKey = () => [isPhone() ? "p" + state.tab + (state.pWeek || "") + (state.pMonth || "") : "d", state.panel || "", state.panel === "day" ? state.selected : "", billsMode() ? "bills" : state.bucket,
+  state.view === "week" ? state.wkMode + state.wkRail : state.view, state.billEditId ?? ""].join("|");
+function keepRail(draw) {
+  const rail = $("rail"), key = railKey(), same = key === keepRail._key, top = rail ? rail.scrollTop : 0;
+  keepRail._key = key; keepRail.fresh = !same;
+  draw();
+  const pin = state.anchor; state.anchor = null;
+  if (!rail) return;
+  if (same) rail.scrollTop = top; else if (state.panel !== "brain") rail.scrollTop = 0;
+  // the row or card he clicked stays exactly where it was on screen, even when a card above it just closed
+  const el2 = same && pin ? [...rail.querySelectorAll("[data-at]")].find((n) => n.dataset.at === pin.at) : null;
+  if (el2) rail.scrollTop += el2.getBoundingClientRect().top - pin.y;
+  showPicked(rail);
+}
+// remember where a row / card is on screen before the click redraws the list
+function pinHere(node) { if (node && node.dataset.at) state.anchor = { at: node.dataset.at, y: node.getBoundingClientRect().top }; }
+// the card he just opened must be on screen: from the calendar → at the top of the panel (if it is not already in
+// full view); in the panel → it stays put, the panel only moves enough to show the whole card
+function showPicked(rail) {
+  const how = state.panelJump; state.panelJump = false;
+  const card = how ? rail.querySelector(".item.picked") : null;
+  showPicked.jumped = !!card && how === "jump";
+  if (!card) return;
+  const bar = rail.querySelector(".sec.head.stick, .sec.ql-card"), rr = rail.getBoundingClientRect(), cr = card.getBoundingClientRect(), pad = 10;
+  const top = bar ? Math.max(rr.top, Math.min(bar.getBoundingClientRect().bottom, rr.top + bar.offsetHeight + 8)) : rr.top;   // what is pinned at the top (title bar, Quick look) covers the first strip of the panel
+  if (cr.top >= top + 4 && cr.bottom <= rr.bottom - 4) return;                          // all of it shows — leave the panel alone
+  if (how === "jump") rail.scrollTop += cr.top - top - pad;                              // from the calendar: its top goes right under the title bar
+  else rail.scrollBy({ top: cr.top < top + 4 ? cr.top - top - pad : Math.max(0, Math.min(cr.bottom - rr.bottom + pad, cr.top - top - pad)), behavior: "smooth" });   // in the panel: glide just enough to show its buttons, never push its title off
+}
+// open a card right where it sits in the panel; a second click on it closes it. Nothing else closes.
+function toggleKey(key, node = null) {
+  pinHere(node);
+  const shut = isOpenKey(key);
+  state.open = state.open.filter((k) => k !== key);
+  if (!shut) state.open.push(key);
+  if (state.editId != null && !state.open.some((k) => keyTask(k) === state.editId)) state.editId = null;   // its edit form went with it
+  state.panelJump = shut ? false : "nudge";
+  render({ now: true });
+}
+function renderRail() { keepRail(() => drawRail($("rail-body"))); }
+function drawRail(r) {
   r.innerHTML = "";
   if (state.panel === "addbill") return renderAddBillPanel(r);
   if (state.panel === "accounts") return renderAccountsPanel(r);
@@ -1486,7 +1606,7 @@ async function askBrain(text) {
   }
   clearTimeout(timer);
   brain.busy = false;
-  await loadAll();
+  await loadAll({ force: true });   // the reply shows even when it changed no data
   if (brain.queue.length) askBrain(brain.queue.shift());
 }
 
@@ -1517,7 +1637,7 @@ async function undoLastBatch() {
   await db.from("fm_moves").delete().eq("batch_id", brain.lastBatch);
   brain.log.push({ who: "ap", text: `Undid ${moves.length} change${moves.length === 1 ? "" : "s"}.` });
   brain.lastBatch = null;
-  await loadAll();
+  await loadAll({ force: true });
   return true;
 }
 
@@ -1603,8 +1723,12 @@ function card(r, label, { sub = "", cls = "" } = {}) {
   r.append(s);
   return s;
 }
-function rowFor(sec, t, { when = "" } = {}) {
+function rowFor(sec, t, { when = "", at = null } = {}) {
+  // in the panel (at = which list): the row he clicked turns into its full card right there. On the calendar side (no at) it opens the day.
+  const here = at ? `${at}:${t.id}` : null;
+  if (here && isOpenKey(here)) { const c = itemCard(t, here); sec.append(c); return c; }
   const row = el("div", "row link" + (isDone(t) ? " done" : ""));
+  if (here) row.dataset.at = here;
   row.append(el("span", "sym" + (isDone(t) ? " ok" : t.priority === "urgent" ? " u" : ""), isDone(t) ? "✓" : PRI[t.priority].mark));
   if (!t.confirmed && t.status !== "done") { const q = el("span", "sym q", "?"); q.title = "size/priority guessed — click the ? on its chip to set"; row.append(q); }
   row.append(el("span", "tt", t.title));
@@ -1612,8 +1736,8 @@ function rowFor(sec, t, { when = "" } = {}) {
   if (s.text !== "Not started") row.append(el("i", "", s.text));
   if (t.job) row.append(el("i", "", t.job));
   if (when) row.append(el("span", "when", when));
-  row.title = tooltip(t);
-  row.addEventListener("click", () => t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
+  row.title = tooltip(t) + (here ? " — click to open it right here" : "");
+  row.addEventListener("click", () => here ? toggleKey(here, row) : t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
   sec.append(row);
   return row;
 }
@@ -1656,17 +1780,19 @@ function renderSkinny(r) {
     if (nx.status === "working") bits.push("working");
     txt.append(el("small", "", bits.join(" · ")));
     row.append(txt);
-    row.title = tooltip(nx);
-    row.addEventListener("click", () => openDay(today, nx.id));
+    const nxAt = "next:" + nx.id, nxOpen = isOpenKey(nxAt);
+    row.title = tooltip(nx) + " — click for the details and every button";
+    row.addEventListener("click", () => toggleKey(nxAt));
     sNext.append(row);
     const bt = el("div", "nxbtn");
     const ok = el("button", "btn ok", "✓ Done"); ok.addEventListener("click", async () => { if (await markDone(nx)) toast(`Done: "${nx.title}" — it stays on today, faded`, { undo: true }); });
     const push = el("button", "btn push", "Push →"); push.title = "Move it to the next work day";
     push.addEventListener("click", async () => { const to = nextDay(today, 1, nx.bucket); if (await moveTask(nx, to, "Pushed from Next up")) toast(`Pushed to ${fmtShort(to)}`, { undo: true }); });
-    const more = el("button", "btn", "More…"); more.addEventListener("click", () => openDay(today, nx.id));
+    const more = el("button", "btn", nxOpen ? "Less ▴" : "More…"); more.title = nxOpen ? "Close the details" : "Details and every button, right here"; more.addEventListener("click", () => toggleKey(nxAt));
     bt.append(ok, push, more);
     if (!nx.confirmed) { const fix = el("button", "btn", "? Set size"); fix.title = "I guessed the size and priority"; fix.addEventListener("click", () => openQuickFix(nx, fix)); bt.append(fix); }
     sNext.append(bt);
+    if (nxOpen) sNext.append(itemCard(nx, nxAt));
   } else {
     sNext.append(el("div", "empty", todayItems.length ? "Everything on today is done." : "Nothing on today. Quick add or tell your assistant."));
   }
@@ -1701,7 +1827,7 @@ function renderSkinny(r) {
   const risky = state.tasks.filter((t) => visible(t) && t.status !== "done" && t.scheduled_date !== today && (
     (t.dropdead_date && t.dropdead_date < today) || (t.target_date && t.target_date < today)
   )).sort(byPriority);
-  risky.slice(0, 4).forEach((t) => rowFor(sStat, t));
+  risky.slice(0, 4).forEach((t) => rowFor(sStat, t, { at: "risk" }));
   const un = unscheduled();
   const inbox = el("div", "row link"); inbox.append(el("b", "", `Inbox: ${un.length} unscheduled`), el("i", "", un.length ? "give each a day →" : ""));
   inbox.addEventListener("click", () => openUnscheduled());
@@ -1735,7 +1861,7 @@ function renderSkinny(r) {
     if (nm >= 0 && nm <= span) { const now = el("i", "now"); now.style.left = (nm / span * 100) + "%"; bar.append(now); }
     tl.append(bar);
     const ticks = el("div", "tlticks"); ["7a", "8", "9", "10", "11", "12", "1", "2", "3", "4p"].forEach((x) => ticks.append(el("span", "", x))); tl.append(ticks);
-    tl.append(el("div", "tlnow", `Now ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).replace(" AM", "").replace(" PM", "")} · ${workLeftText()}`));
+    tl.append(el("div", "tlnow", nowLabel()));
     sToday.append(tl);
     const hrs = el("div", "row wrap");
     if (L.cap === 0 && offOn(today).length) hrs.innerHTML = `<b>Day off</b> — ${esc(offOn(today).map((m) => m.title).join(", "))}`;
@@ -1773,26 +1899,28 @@ function renderSkinny(r) {
   if (owe.length || owed.length) {
     const sP = card(r, "Promises");
     owe.slice(0, 5).forEach((t) => {
-      const row = el("div", "row pr link");
+      if (isOpenKey("owe:" + t.id)) { sP.append(itemCard(t, "owe:" + t.id)); return; }
+      const row = el("div", "row pr link"); row.dataset.at = "owe:" + t.id;
       const d = t.dropdead_date || t.target_date || t.scheduled_date;
       row.append(el("span", "arr", "→"), el("span", "who", `You owe ${t.promised_to}`), el("span", "what", t.title), el("span", "when", d ? fmtShort(d).replace(",", "") : "no date"));
-      row.title = tooltip(t);
-      row.addEventListener("click", () => t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
+      row.title = tooltip(t) + " — click to open it right here";
+      row.addEventListener("click", () => toggleKey("owe:" + t.id, row));
       sP.append(row);
     });
     owed.slice(0, 5).forEach((t) => {
-      const row = el("div", "row pr in link");
+      if (isOpenKey("owed:" + t.id)) { sP.append(itemCard(t, "owed:" + t.id)); return; }
+      const row = el("div", "row pr in link"); row.dataset.at = "owed:" + t.id;
       const days = Math.max(0, Math.round((Date.now() - new Date(t.updated_at || t.created_at)) / 86400000));
       row.append(el("span", "arr", "←"), el("span", "who", `${t.waiting_on || "Someone"} owes you`), el("span", "what", t.title), el("span", "when", `${days} d`));
-      row.title = tooltip(t);
-      row.addEventListener("click", () => t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
+      row.title = tooltip(t) + " — click to open it right here";
+      row.addEventListener("click", () => toggleKey("owed:" + t.id, row));
       sP.append(row);
     });
   }
 
   // 6. TASKS (today)
   const sT = card(r, `Tasks · ${open.length} open`, { sub: todayItems.length - open.length ? `${todayItems.length - open.length} done today` : "" });
-  todayItems.forEach((t) => rowFor(sT, t));
+  todayItems.forEach((t) => rowFor(sT, t, { at: "today" }));
   if (!todayItems.length) sT.append(el("div", "empty", "Nothing scheduled today."));
   if (state.meetingsSync) sT.append(el("div", "hint", `Outlook checked ${new Date(state.meetingsSync).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} · every 15 min`));
 }
@@ -1819,13 +1947,14 @@ function renderDonePanel(r) {
     const label = k === today ? "Today" : k === yest ? "Yesterday" : fmtLong(k);
     const s = card(r, `${label} · ${list.length}`, { sub: list.map((t) => SIZE_HRS[t.size] ?? 1).reduce((a, b) => a + b, 0) + " h" });
     list.forEach((t) => {
-      const row = el("div", "row link done");
+      if (!t.deleted_at && isOpenKey("done:" + t.id)) { s.append(itemCard(t, "done:" + t.id)); return; }
+      const row = el("div", "row link done"); row.dataset.at = "done:" + t.id;
       row.append(el("span", "sym ok", "✓"), el("span", "tt", t.title));
       row.append(el("i", "", whenShort(t.done_at).replace(/^\w+ /, "")));
       if (t.job) row.append(el("i", "", t.job));
       if (t.deleted_at) row.append(el("i", "", "in Trash"));
-      row.title = tooltip(t) + (t.deleted_at ? " · in the Trash" : "") + " — click to open";
-      row.addEventListener("click", () => t.deleted_at ? openPanel("trash", t.id) : t.scheduled_date ? openDay(t.scheduled_date, t.id) : openUnscheduled(t.id));
+      row.title = tooltip(t) + (t.deleted_at ? " · in the Trash — click to see it there" : " — click to open it right here");
+      row.addEventListener("click", () => t.deleted_at ? openPanel("trash", t.id) : toggleKey("done:" + t.id, row));
       s.append(row);
     });
   }
@@ -1838,7 +1967,9 @@ function renderTrashPanel(r) {
   const s = card(r, "Removed items", { sub: `kept ${TRASH_DAYS} days, then deleted for good` });
   if (!items.length) s.append(el("div", "empty", "Nothing here. Remove something from a day and it waits here — Put back brings it home."));
   items.forEach((t) => {
-    const c = el("div", `item p-${t.priority}` + (isDone(t) ? " is-done" : "") + (state.openId === t.id ? " selected" : ""));
+    const c = el("div", `item p-${t.priority}` + (isDone(t) ? " is-done" : "") + (state.openId === t.id ? " opened picked" : ""));
+    c.dataset.id = t.id;
+    if (state.openId === t.id) c.append(el("span", "pick-tag", "▸ SELECTED"));
     const head = el("div", "head");
     head.append(el("span", `chip p-${t.priority}`, `${PRI[t.priority].mark} ${PRI[t.priority].label}`), el("span", "title", t.title));
     if (isDone(t)) head.append(el("span", "status-pill done", "✓ Done"));
@@ -1868,7 +1999,7 @@ function renderTrashPanel(r) {
     foot.append(all); s.append(foot);
   }
 }
-function openPanel(which, taskId = null) { state.panel = which; state.openId = taskId; state.editId = null; render({ now: true }); const p = $("rail"); if (p) p.scrollTop = 0; }
+function openPanel(which, taskId = null) { state.panel = which; state.openId = taskId; state.billOpenAt = []; state.editId = null; state.panelJump = taskId != null ? "jump" : false; render({ now: true }); }
 
 // ---------- PHONE ----------
 // One screen at a time in the panel box; the month grid on the right is hidden. Big type,
@@ -1881,7 +2012,9 @@ function renderPhone() {
     b.classList.toggle("on", on);
     b.setAttribute("aria-current", on ? "page" : "false");
   });
-  const r = $("rail-body");
+  keepRail(() => drawPhone($("rail-body")));
+}
+function drawPhone(r) {
   r.innerHTML = "";
   if (state.panel === "addbill") return renderAddBillPanel(r);
   if (state.panel === "accounts") return renderAccountsPanel(r);
@@ -1903,7 +2036,6 @@ function phoneTab(tab) {
   else if (tab === "brain") { state.tab = "brain"; state.panel = "brain"; }
   else { state.tab = tab; state.panel = null; state.billOpen = null; if (tab === "week") state.pWeek = null; if (tab === "month") state.pMonth = null; }
   render({ now: true });
-  const rail = $("rail"); if (rail) rail.scrollTop = 0;
 }
 // a task as one full-width line: mark · title · the one thing that matters (est. time / promise / drop-dead / status)
 function phoneChip(t) {
@@ -2000,7 +2132,7 @@ function renderPhoneWeek(r) {
   if (undoStack.length) { const u = el("div", "row undo"); const b = el("button", "btn sm", "↶ Undo"); b.addEventListener("click", undoLast); u.append(b, el("span", "ulab", undoStack[undoStack.length - 1].label)); foot.append(u); }
   const out = el("div", "row"); const lo = el("button", "btn ghost sm", "Sign out"); lo.addEventListener("click", () => $("logout-btn").click()); out.append(lo, el("i", "", document.querySelector(".ver")?.textContent || "")); foot.append(out);
   r.append(foot);
-  if (hasToday && !state.pWeek) requestAnimationFrame(() => { const t = r.querySelector(".pday.today"); if (t && t.getBoundingClientRect().top > window.innerHeight * 0.7) t.scrollIntoView({ block: "start" }); });
+  if (hasToday && !state.pWeek && keepRail.fresh) requestAnimationFrame(() => { const t = r.querySelector(".pday.today"); if (t && t.getBoundingClientRect().top > window.innerHeight * 0.7) t.scrollIntoView({ block: "start" }); });
 }
 function renderPhoneMonth(r) {
   const today = todayISO();
@@ -2077,7 +2209,7 @@ function panelHeader(r, title, sub) {
   const x = el("button", "btn ghost sm close", isPhone() ? "‹ Back" : "✕ Close"); x.title = "Close (Esc)";
   x.addEventListener("click", closePanel);
   s.querySelector(".lab").append(x);
-  s.classList.add("head");
+  s.classList.add("head", "stick");
   return s;
 }
 
@@ -2085,13 +2217,8 @@ function renderDayPanel(r) {
   const d = state.selected;
   const items = tasksOn(d);
   panelHeader(r, fmtLong(d), `${items.length} item${items.length === 1 ? "" : "s"}`);
-  // The one he clicked comes FIRST — expanded, outlined, at the top of the panel. No hunting.
-  const picked = state.openId != null ? items.find((t) => t.id === state.openId) : null;
-  if (picked) {
-    const sP = card(r, "Selected", { sub: "what you clicked — work in it right here", cls: "pick" });
-    sP.append(itemCard(picked));
-    if (state.panelJump) { state.panelJump = false; requestAnimationFrame(() => { const p = $("rail"); if (p) p.scrollTop = 0; }); }
-  }
+  // v59: the list keeps the day's order. The task he clicked opens right where it sits, framed and tagged SELECTED;
+  // nothing is pulled to the top (keepRail brings it into view when the click came from the calendar).
   if (showMeetings() && !isWeekend(d)) {
     const sH = card(r, "Hours"); sH.append(loadLine(d));
     const ms = meetingsOn(d);
@@ -2102,19 +2229,16 @@ function renderDayPanel(r) {
       sM.append(box);
     }
   }
-  const rest = picked ? items.filter((t) => t.id !== picked.id) : items;
-  const nDone = rest.filter(isDone).length;
-  if (!picked || rest.length) {
-    const sT = card(r, picked ? "Also on this day" : "Tasks", { sub: nDone ? `${rest.length - nDone} open · ${nDone} done — click one for detail` : "click one for detail" });
-    if (!items.length) sT.append(el("div", "empty", "Nothing here yet. Quick add puts new things on this day."));
-    rest.forEach((t) => sT.append(itemCard(t)));
-  }
+  const nDone = items.filter(isDone).length;
+  const sT = card(r, "Tasks", { sub: nDone ? `${items.length - nDone} open · ${nDone} done — click one to open it right here` : "click one to open it right here" });
+  if (!items.length) sT.append(el("div", "empty", "Nothing here yet. Quick add puts new things on this day."));
+  items.forEach((t) => sT.append(itemCard(t)));
   // coming up (next 5 days)
   const soon = [];
   for (let i = 1; i <= 5; i++) { const dd = iso(addDays(fromISO(d), i)); openOn(dd).forEach((t) => soon.push(t)); }
   if (soon.length) {
     const sC = card(r, "Coming up", { sub: "next 5 days" });
-    soon.slice(0, 8).forEach((t) => rowFor(sC, t, { when: fmtShort(t.scheduled_date).split(",")[0] }));
+    soon.slice(0, 8).forEach((t) => rowFor(sC, t, { when: fmtShort(t.scheduled_date).split(",")[0], at: "soon" }));
   }
 }
 
@@ -2212,6 +2336,7 @@ function renderAddPanel(r) {
     let n = 0;
     for (const line of v) {
       const p = parseQuick(line);
+      if (!p.title) continue;
       const row = { title: p.title, priority: p.priority !== "normal" ? p.priority : k.priority, bucket: p.bucket || addBucket(), scheduled_date: p.date || k.date, size: k.size, confirmed: k.sizeSet, planned: true, job: p.job, source: "add" };
       if (k.hrs) row.notes = `Adam: ${k.hrs} h`;
       if (await insertTask(row)) n++;
@@ -2233,23 +2358,26 @@ function renderAddPanel(r) {
 }
 
 // ---------- item card ----------
-function itemCard(t) {
-  const card = el("div", `item p-${t.priority}` + (t.planned ? " planned" : "") + (t.status === "done" ? " is-done" : ""));
-  card.dataset.id = t.id;
+function itemCard(t, key = "card:" + t.id) {
+  const open = isOpenKey(key), sel = open && selKey() === key;
+  const card = el("div", `item p-${t.priority}` + (t.planned ? " planned" : "") + (t.status === "done" ? " is-done" : "") + (open ? " opened" : "") + (sel ? " picked" : ""));
+  card.dataset.id = t.id; card.dataset.at = key;
+  if (open) card.append(el("span", "pick-tag" + (sel ? "" : " quiet"), sel ? "▸ SELECTED" : "OPEN"));   // same strip on every open card, so nothing shifts when the selection moves on
   const head = el("div", "head");
   const chip = el("span", `chip p-${t.priority}`, `${PRI[t.priority].mark} ${PRI[t.priority].label}`);
   const title = el("span", "title", t.title);
   const s = statusLine(t);
   const st = el("span", `status-pill ${s.cls}`, s.text);
-  const caret = el("span", "caret", state.openId === t.id ? "▴" : "▾");
+  const caret = el("span", "caret", open ? "▴" : "▾");
   head.append(chip, title);
   if (timedMin(t) != null && t.status !== "done") head.append(el("span", "status-pill tm", fmtMin(timedMin(t))));
   if (!t.confirmed && t.status !== "done") { const q = el("span", "status-pill q", "? est. time"); q.title = "Estimated time and priority were guessed by AP — open it to set them"; head.append(q); }
   head.append(st, caret);
-  head.addEventListener("click", () => { state.openId = state.openId === t.id ? null : t.id; state.editId = null; render(); });
+  head.title = open ? "Click to close it" : "Click to open it right here";
+  head.addEventListener("click", () => toggleKey(key, card));
   card.append(head);
 
-  if (state.openId === t.id) {
+  if (open) {
     if (state.editId === t.id) card.append(editForm(t));
     else {
       const d = el("div", "detail");
@@ -2275,7 +2403,7 @@ function itemCard(t) {
       };
       // Adam's layout: row 1 = Done · → Tomorrow · → +1 week · ▦ Pick a day (4 across) · row 2 = ✎ Edit · Remove
       const r1 = el("div", "actions r4");
-      if (!isDone(t)) r1.append(btn("✓ Done", async () => { if (await markDone(t)) toast(`Done: "${t.title}" — it stays on the day, faded`, { undo: true }); }, "btn sm olive"));
+      if (!isDone(t)) r1.append(btn("✓ Done", async () => { closeTask(t.id); if (await markDone(t)) toast(`Done: "${t.title}" — it stays on the day, faded`, { undo: true }); }, "btn sm olive"));
       else r1.append(btn("Reopen", async () => { if (await reopen(t)) toast(`Reopened "${t.title}"`, { undo: true }); }));
       { const m = btn("→ Tomorrow", () => moveTo(iso(addDays(new Date(), 1)), "Moved to tomorrow from the panel")); m.title = "Move it to tomorrow (work skips weekends and days off)"; r1.append(m); }
       { const m = btn("→ +1 week", () => moveTo(iso(addDays(t.scheduled_date ? fromISO(t.scheduled_date) : new Date(), 7)), "Pushed a week from the panel")); m.title = "Move it a week later"; r1.append(m); }
@@ -2283,7 +2411,7 @@ function itemCard(t) {
         c.addEventListener("click", (e) => { e.stopPropagation(); openDatePop(c, t.scheduled_date, async (d) => { if (await moveTask(t, d, `Moved to ${fmtShort(d)} from the panel calendar`)) toast(`Moved to ${fmtShort(d)}`, { undo: true }); }); }); r1.append(c); }
       card.append(r1);
       const r2 = el("div", "actions r2");
-      { const e = btn("✎ Edit", () => { state.editId = t.id; render(); }, "btn sm primary edit"); e.title = "Change anything on this item"; r2.append(e); }
+      { const e = btn("✎ Edit", () => { state.open = state.open.filter((k) => k !== key).concat(key); state.editId = t.id; state.panelJump = "nudge"; render({ now: true }); }, "btn sm primary edit"); e.title = "Change anything on this item"; r2.append(e); }
       { const x = btn("Remove", async () => { if (await removeTask(t)) toast(`Removed "${t.title}" — it's in the Trash for ${TRASH_DAYS} days`, { undo: true }); }, "btn sm danger"); x.title = "Off the calendar and into the Trash — Put back any time in the next " + TRASH_DAYS + " days"; r2.append(x); }
       card.append(r2);
       // only when they apply
@@ -2364,29 +2492,35 @@ function editForm(t) {
 function openDay(dateISO, taskId = null) {
   if (!dateISO) return openUnscheduled(taskId);
   state.selected = dateISO; state.panel = "day"; state.openId = taskId; state.editId = null;
-  state.panelJump = taskId != null;   // a clicked task goes to the top of the panel, scrolled into view
+  state.panelJump = taskId != null ? "jump" : false;   // a task clicked on the calendar is brought into view in the panel, expanded where it sits
   render({ now: true });
 }
-function openUnscheduled(taskId = null) { state.panel = "unscheduled"; state.openId = taskId; state.editId = null; render(); }
+function openUnscheduled(taskId = null) { state.panel = "unscheduled"; state.openId = taskId; state.editId = null; state.panelJump = taskId != null ? "jump" : false; render({ now: true }); }
 function openAdd() { state.panel = "add"; state.openId = null; state.editId = null; render({ now: true }); }
-function closePanel() { state.panel = null; state.openId = null; state.editId = null; state.billOpen = null; state.billDraft = null; state.billEditId = null; if (state.tab === "add" || state.tab === "brain") state.tab = "week"; render({ now: true }); }
+function closePanel() { state.panel = null; state.openId = null; state.billOpenAt = []; state.editId = null; state.billOpen = null; state.billDraft = null; state.billEditId = null; if (state.tab === "add" || state.tab === "brain") state.tab = "week"; render({ now: true }); }
 function openBillDay(dateISO, billId = null) {
-  state.selected = dateISO; state.panel = "day"; state.billOpen = billId; state.openId = null; state.editId = null;
-  state.panelJump = billId != null;
+  state.selected = dateISO; state.panel = "day"; state.billOpen = billId; state.billOpenAt = []; state.openId = null; state.editId = null;
+  state.panelJump = billId != null ? "jump" : false;
   render({ now: true });
 }
-function setBucket(b) { state.bucket = b; localStorage.setItem("fm.bucket", b); closeBillPeek(); if (state.panel === "day") { state.panel = null; state.openId = null; state.billOpen = null; } render({ now: true }); }
+function setBucket(b) { state.bucket = b; localStorage.setItem("fm.bucket", b); closeBillPeek(); state.billOpenAt = []; state.openId = null; if (state.panel === "day") { state.panel = null; state.openId = null; state.billOpen = null; } render({ now: true }); }
 
 // ---------- quick add parsing ----------
 // "Send James layout fri !!"  → title, priority urgent, date next Friday
 // "#home" → home calendar · "@miner" → job · "tomorrow"/"today"/"mon".."sun"/"10/30"
 const DOW = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+// v59 — plain words are read more carefully, so a title is never eaten or mis-dated:
+//   · a day needs the real name or its short form (mon, monday, thu, thurs…) — "Monthly report" and "Wedge anchors" stay titles
+//   · a board size is not a date: 1/2, 1/4, 3/4 and the eighths (5/8 drywall) stay in the title unless he writes "on 5/8" / "by 5/8" / "due 5/8"
+//   · "high" / "low" set the priority only as the last word ("call James high") or as "high priority" — "low wall", "high bay" stay titles
+const DAY_WORD = /\b(sun(?:day)?|mon(?:day)?|tue(?:s|sday)?|wed(?:s|nesday)?|thu(?:r|rs|rsday)?|fri(?:day)?|sat(?:urday)?)\b/i;
+const SIZE_FRACTION = /^(1\/2|1\/4|3\/4|[1357]\/8)$/;
 function parseQuick(text) {
   let t = " " + text.trim() + " ";
   const out = { priority: "normal", bucket: null, job: null, date: null };
-  if (/\s!!\s|\burgent\b/i.test(t)) { out.priority = "urgent"; t = t.replace(/\s!!\s/g, " ").replace(/\burgent\b/ig, " "); }
-  else if (/\s!\s|\bhigh\b/i.test(t)) { out.priority = "high"; t = t.replace(/\s!\s/g, " ").replace(/\bhigh\b/ig, " "); }
-  else if (/\blow\b/i.test(t)) { out.priority = "low"; t = t.replace(/\blow\b/ig, " "); }
+  let mark = null;   // !! / ! are marks, safe anywhere; the words wait until the date and job are out of the way
+  if (/\s!!\s|\burgent\b/i.test(t)) { mark = "urgent"; t = t.replace(/\s!!\s/g, " ").replace(/\burgent\b/ig, " "); }
+  else if (/\s!\s/.test(t)) { mark = "high"; t = t.replace(/\s!\s/g, " "); }
   const bm = t.match(/#(work|home)\b/i); if (bm) { out.bucket = bm[1].toLowerCase(); t = t.replace(bm[0], " "); }
   const jm = t.match(/@([\w&-]+)/); if (jm) {
     const j = state.jobs.find((x) => x.name.toLowerCase().startsWith(jm[1].toLowerCase()));
@@ -2396,12 +2530,17 @@ function parseQuick(text) {
   if (/\btomorrow\b/i.test(t)) { out.date = iso(addDays(today, 1)); t = t.replace(/\btomorrow\b/ig, " "); }
   else if (/\btoday\b/i.test(t)) { out.date = todayISO(); t = t.replace(/\btoday\b/ig, " "); }
   else {
-    const dm = t.match(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/i);
-    if (dm) { const want = DOW.indexOf(dm[1].toLowerCase()); let d = addDays(today, 1); while (d.getDay() !== want) d = addDays(d, 1); out.date = iso(d); t = t.replace(dm[0], " "); }
-    const nm = t.match(/\b(\d{1,2})\/(\d{1,2})\b/);
-    if (nm) { const d = new Date(today.getFullYear(), Number(nm[1]) - 1, Number(nm[2])); if (d < today) d.setFullYear(d.getFullYear() + 1); out.date = iso(d); t = t.replace(nm[0], " "); }
+    const dm = t.match(DAY_WORD);
+    if (dm) { const want = DOW.indexOf(dm[1].slice(0, 3).toLowerCase()); let d = addDays(today, 1); while (d.getDay() !== want) d = addDays(d, 1); out.date = iso(d); t = t.replace(dm[0], " "); }
+    const nm = [...t.matchAll(/(\b(?:on|by|due)\s+)?\b(\d{1,2})\/(\d{1,2})\b(?!\/)(\s*(?:"|”|″|in\b|inch))?/ig)]
+      .find((m) => !m[4] && Number(m[2]) >= 1 && Number(m[2]) <= 12 && Number(m[3]) >= 1 && Number(m[3]) <= 31 && (m[1] || !SIZE_FRACTION.test(`${m[2]}/${m[3]}`)));
+    if (nm) { const d = new Date(today.getFullYear(), Number(nm[2]) - 1, Number(nm[3])); if (d < today) d.setFullYear(d.getFullYear() + 1); out.date = iso(d); t = t.replace(nm[0], nm[1] && !/^on/i.test(nm[1]) ? nm[1] : " "); }   // "on 5/8" goes whole; "due 12/11" keeps its "due"
   }
-  out.title = t.replace(/\s+/g, " ").trim();
+  t = t.replace(/\s+/g, " ").trim();
+  const pw = !mark && t.match(/^(.*?)\s*\b(high|low)(?:\s+priority)?$/i);   // the word counts only at the very end of what is left
+  if (pw && pw[1].trim()) { mark = pw[2].toLowerCase(); t = pw[1].trim(); }
+  if (mark) out.priority = mark;
+  out.title = t;
   return out;
 }
 
@@ -2414,7 +2553,7 @@ async function quickAdd(text) {
   if (!t) return;
   toast(`Added to ${fmtShort(date)} — set size, target and drop-dead if it has them`);
   // open it in edit mode so target / drop-dead get asked right away
-  state.selected = date; state.panel = "day"; state.openId = t.id; state.editId = t.id;
+  state.selected = date; state.panel = "day"; state.openId = t.id; state.editId = t.id; state.panelJump = "jump";
   render();
 }
 
@@ -2520,7 +2659,7 @@ function voiceFinish() {
 }
 function voiceToggle(key) { if (voice.on) voiceStop(); else voiceStart(key); }
 // tiny handle for checking the voice state from the console / tests
-window.AP = { get voice() { return { on: voice.on, key: voice.key, text: voiceText(), restarts: voice.restarts }; }, get brain() { return { busy: brain.busy, queued: brain.queue.length, log: brain.log.length }; }, get panel() { return state.panel; } };
+window.AP = { get voice() { return { on: voice.on, key: voice.key, text: voiceText(), restarts: voice.restarts }; }, get brain() { return { busy: brain.busy, queued: brain.queue.length, log: brain.log.length }; }, get panel() { return state.panel; }, get draws() { return render.count || 0; }, parse: (text) => parseQuick(text), get open() { return { keys: [...state.open], bills: [...state.billOpenAt] }; } };
 
 function initMic() {
   // one button: press → listen; press again → send; typed text in the box → send
@@ -2874,9 +3013,14 @@ async function doUnpay(o) {
 }
 
 // one bill, one line: logo · name + when · $ · Paid ✓
-function billRow(o, { when = true } = {}) {
+function billRow(o, { when = true, at = null } = {}) {
+  const here = at ? `${at}:${o.bill.id}:${o.due}` : null;
+  if (here && state.billOpenAt.includes(here)) {
+    const c = billCard(o, { picked: state.billOpenAt[state.billOpenAt.length - 1] === here, shut: () => { pinHere(c); state.billOpenAt = state.billOpenAt.filter((k) => k !== here); render({ now: true }); } });
+    c.dataset.at = here; return c;
+  }
   const today = todayISO(), st = statusOf(o.bill, o.due, today);
-  const row = el("div", "brow st-" + st);
+  const row = el("div", "brow st-" + st); if (here) row.dataset.at = here;
   row.append(billLogo(o.bill));
   const tt = el("span", "tt"); tt.append(el("b", "", o.bill.name));
   const bits = [];
@@ -2892,8 +3036,8 @@ function billRow(o, { when = true } = {}) {
   btn.title = st === "paid" ? "Mark it unpaid again" : "Mark this one paid (Undo if you slip)";
   btn.addEventListener("click", (e) => { e.stopPropagation(); st === "paid" ? doUnpay(o) : doPay(o); });
   row.append(btn);
-  row.title = `${o.bill.name} · ${money(o.bill.amount)} · due ${fmtShort(o.due)} — click to open`;
-  row.addEventListener("click", () => openBillDay(o.due, o.bill.id));
+  row.title = `${o.bill.name} · ${money(o.bill.amount)} · due ${fmtShort(o.due)} — click to open` + (here ? " it right here" : "");
+  row.addEventListener("click", () => { if (here) { pinHere(row); state.billOpenAt = state.billOpenAt.concat(here); state.panelJump = "nudge"; render({ now: true }); } else openBillDay(o.due, o.bill.id); });
   return row;
 }
 
@@ -2919,18 +3063,18 @@ function renderBillsPanel(r) {
     box(money(amountOf(late) + amountOf(week), false), "NEEDED NOW", "", "Past due + the next 7 days"));
   bq.append(strip); sT.append(bq);
   // 2. PAST DUE — always first, always loud
-  if (late.length) { const sL = card(r, "!! Past due", { sub: `${money(amountOf(late))} · not marked paid`, cls: "late" }); late.forEach((o) => sL.append(billRow(o))); }
+  if (late.length) { const sL = card(r, "!! Past due", { sub: `${money(amountOf(late))} · not marked paid`, cls: "late" }); late.forEach((o) => sL.append(billRow(o, { at: "late" }))); }
   // 3. DUE IN THE NEXT 7 DAYS
   const sW = card(r, "Due in the next 7 days", { sub: week.length ? money(amountOf(week)) : "" });
   if (!week.length) sW.append(el("div", "empty", "Nothing due in the next 7 days."));
-  week.forEach((o) => sW.append(billRow(o)));
+  week.forEach((o) => sW.append(billRow(o, { at: "week" })));
   // 4. LATER THIS MONTH
   const later = [...S.soon, ...S.open].filter((o) => !week.some((w) => w.bill.id === o.bill.id && w.due === o.due) && o.due >= today).sort((a, b) => a.due.localeCompare(b.due));
-  if (later.length) { const sO = card(r, `Later in ${monthName}`, { sub: money(amountOf(later)) }); later.forEach((o) => sO.append(billRow(o))); }
+  if (later.length) { const sO = card(r, `Later in ${monthName}`, { sub: money(amountOf(later)) }); later.forEach((o) => sO.append(billRow(o, { at: "later" }))); }
   // 5. PAID
   const sP = card(r, `Paid in ${monthName}`, { sub: S.paidList.length ? `${S.paidList.length} · ${money(S.paid)}` : "" });
   if (!S.paidList.length) sP.append(el("div", "empty", "Nothing marked paid yet this month."));
-  S.paidList.slice().sort((a, b) => b.due.localeCompare(a.due)).forEach((o) => sP.append(billRow(o)));
+  S.paidList.slice().sort((a, b) => b.due.localeCompare(a.due)).forEach((o) => sP.append(billRow(o, { at: "paid" })));
   // 6. ACCOUNTS — what comes out of each one this month
   renderAccountsCard(r, y, m);
   // 7. buttons
@@ -2960,14 +3104,17 @@ function renderAccountsCard(r, y, m) {
 }
 
 // a bill opened in the panel: everything about it + the buttons
-function billCard(o) {
+function billCard(o, { picked = false, shut = null } = {}) {
   const b = o.bill, today = todayISO(), st = statusOf(b, o.due, today);
-  const c = el("div", "item bill st-" + st); c.dataset.bill = b.id;
+  const c = el("div", "item bill st-" + st + (picked || shut ? " opened" : "") + (picked ? " picked" : "")); c.dataset.bill = b.id; c.dataset.due = o.due;
+  if (picked || shut) c.append(el("span", "pick-tag" + (picked ? "" : " quiet"), picked ? "▸ SELECTED" : "OPEN"));
   const head = el("div", "head");
+  if (shut) { head.title = "Click to close it"; head.addEventListener("click", shut); }
   head.append(billLogo(b, "logo big"), el("span", "title", b.name), el("span", "bamt", money(b.amount)));
   const pill = el("span", "status-pill " + (st === "late" ? "overdue" : st === "paid" ? "done" : st === "today" || st === "soon" ? "warn" : ""),
     st === "paid" ? "✓ Paid" : st === "late" ? `!! ${lateWord(o, today)}` : st === "today" ? "DUE TODAY" : `Due ${fmtShort(o.due).replace(",", "")}`);
   head.append(pill);
+  if (shut) head.append(el("span", "caret", "▴"));
   c.append(head);
   const p = paymentFor(b, o.due);
   const dt = el("div", "detail");
@@ -3003,20 +3150,12 @@ function billCard(o) {
 function renderBillDayPanel(r) {
   const d = state.selected, occ = occOn(d);
   panelHeader(r, fmtLong(d), `${occ.length} bill${occ.length === 1 ? "" : "s"}${occ.length ? " · " + money(amountOf(occ)) : ""}`);
-  const picked = state.billOpen != null ? occ.find((o) => o.bill.id === state.billOpen) : null;
-  if (picked) {
-    const sP = card(r, "Selected", { sub: "what you clicked — work in it right here", cls: "pick" });
-    sP.append(billCard(picked));
-    if (state.panelJump) { state.panelJump = false; requestAnimationFrame(() => { const p = $("rail"); if (p) p.scrollTop = 0; }); }
-  }
-  const rest = picked ? occ.filter((o) => o !== picked) : occ;
-  if (!picked || rest.length) {
-    const sT = card(r, picked ? "Also due this day" : "Bills due", { sub: rest.length ? "click one for detail" : "" });
-    if (!occ.length) sT.append(el("div", "empty", "No bills due this day."));
-    rest.forEach((o) => sT.append(billCard(o)));
-  }
+  // v59: the day's bills in their order; the one he clicked is framed and tagged SELECTED where it sits (brought into view from the calendar)
+  const sT = card(r, "Bills due", { sub: occ.length > 1 ? `${occ.length} this day` : "" });
+  if (!occ.length) sT.append(el("div", "empty", "No bills due this day."));
+  occ.forEach((o) => sT.append(billCard(o, { picked: state.billOpen != null && o.bill.id === state.billOpen })));
   const soon = dueWithin(d, 10).filter((o) => o.due > d);
-  if (soon.length) { const sC = card(r, "Coming up", { sub: "next 10 days" }); soon.slice(0, 8).forEach((o) => sC.append(billRow(o))); }
+  if (soon.length) { const sC = card(r, "Coming up", { sub: "next 10 days" }); soon.slice(0, 8).forEach((o) => sC.append(billRow(o, { at: "soon" }))); }
   const act = el("div", "sec actions-row");
   const add = el("button", "btn primary sm", `+ Add bill due ${fmtShort(d).split(",")[1]?.trim() || fmtShort(d)}`); add.addEventListener("click", () => openAddBill({ anchor_date: d }));
   act.append(add); r.append(act);
@@ -3068,7 +3207,6 @@ function openAddBill(seed = null) {
   }
   state.panel = "addbill"; state.openId = null; state.editId = null;
   render({ now: true });
-  const p = $("rail"); if (p) p.scrollTop = 0;
   requestAnimationFrame(() => { const n = document.querySelector("#rail-body input[name=bname]"); if (n && !state.billEditId) n.focus(); });
 }
 function renderAddBillPanel(r) {
@@ -3237,7 +3375,7 @@ function shift(n) {
   if (state.view === "month") {
     state.cursor = new Date(c.getFullYear(), c.getMonth() + n, 1);
     state.mJump = iso(state.cursor); state.mJumpSmooth = true;
-    const sc = document.querySelector(".mscroll"); state.mPrevTop = sc ? sc.scrollTop : null;
+    state.mPrev = state.mTop ? { ...state.mTop } : null;   // the week on screen now — the glide starts there
   }
   else if (state.view === "week") state.cursor = addDays(c, 7 * n);
   else state.cursor = addDays(c, n);
@@ -3272,7 +3410,10 @@ function wire() {
   $("quick-add").addEventListener("submit", async (e) => { e.preventDefault(); const v = $("quick-input").value.trim(); if (!v) return; $("quick-input").value = ""; await quickAdd(v); });
   document.addEventListener("keydown", (e) => {
     const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
-    if (e.key === "Escape") { if (popEl) closeQuickFix(); else if (state.editId) { state.editId = null; render(); } else if (state.panel) closePanel(); }
+    if (e.key === "Escape") {   // one step back per press: popover → edit form → the open panel → any cards left open on the overview
+      if (popEl) closeQuickFix(); else if (state.editId) { state.editId = null; render(); } else if (state.panel) closePanel();
+      else if (state.open.length || state.billOpenAt.length) { state.open = []; state.billOpenAt = []; render({ now: true }); }
+    }
     if (e.key === "/" && !typing) { e.preventDefault(); $("quick-input").focus(); }
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && !typing) { e.preventDefault(); undoLast(); }   // Ctrl+Z = undo the last change
   });

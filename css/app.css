@@ -126,11 +126,6 @@ b, strong { font-weight: 700; }
 /* ↻N = carried forward N times (it slipped); the status line says the day it was first due */
 .chip .carry { display: inline-block; font-size: 10px; font-weight: 800; color: var(--maroon); border: 1px solid var(--maroon); border-radius: 3px; padding: 0 3px; line-height: 12px; margin-right: 4px; vertical-align: 1px; background: #fff; }
 .chip.p-urgent .carry { color: #fff; border-color: #fff; background: transparent; }
-/* the task he clicked: first in the panel, outlined, labeled */
-.sec.pick { border: 2px solid var(--blue); box-shadow: 2px 2px 0 rgba(42,74,138,.35); }
-.sec.pick .lab { background: var(--blue); color: #fff; }
-.sec.pick .lab small { color: #e8edf7; }
-.sec.pick .item { margin-top: 2px; }
 /* "?" = size or priority were guessed; click it to set them */
 .chip .q { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 1.5px solid var(--maroon); color: var(--maroon); font-size: 10px; font-weight: 900; line-height: 11px; text-align: center; margin-right: 4px; vertical-align: -2px; cursor: pointer; }
 .chip.p-urgent .q { border-color: #fff; }
@@ -169,11 +164,12 @@ b, strong { font-weight: 700; }
 .mscroll::-webkit-scrollbar-thumb { min-height: 64px; border: solid transparent; border-width: 5px 9px 5px 7px; border-radius: 12px; background-color: var(--rule); background-clip: padding-box; }
 .mscroll::-webkit-scrollbar-thumb:hover { border-width: 5px 8px 5px 6px; background-color: #000; }   /* a little wider under the mouse: "you can grab this" */
 .mscroll::-webkit-scrollbar-thumb:active { border-width: 5px 8px 5px 6px; background-color: var(--blue); }
-.panel::-webkit-scrollbar, .tg::-webkit-scrollbar, .dv-side::-webkit-scrollbar, .dayview::-webkit-scrollbar, .apal-stack::-webkit-scrollbar, .tg-tray::-webkit-scrollbar { width: 18px; height: 18px; }
-.panel::-webkit-scrollbar-track, .tg::-webkit-scrollbar-track, .dv-side::-webkit-scrollbar-track, .dayview::-webkit-scrollbar-track, .apal-stack::-webkit-scrollbar-track, .tg-tray::-webkit-scrollbar-track { margin: 8px 0; border: solid transparent; border-width: 0 4px 0 2px; background: var(--olive) padding-box; border-radius: 9px; box-shadow: inset 0 0 0 1px var(--rule); }
-.panel::-webkit-scrollbar-thumb, .tg::-webkit-scrollbar-thumb, .dv-side::-webkit-scrollbar-thumb, .dayview::-webkit-scrollbar-thumb, .apal-stack::-webkit-scrollbar-thumb, .tg-tray::-webkit-scrollbar-thumb { min-height: 48px; border: solid transparent; border-width: 4px 7px 4px 5px; border-radius: 9px; background-color: var(--rule); background-clip: padding-box; }
-.panel::-webkit-scrollbar-thumb:hover, .tg::-webkit-scrollbar-thumb:hover, .dv-side::-webkit-scrollbar-thumb:hover, .dayview::-webkit-scrollbar-thumb:hover, .apal-stack::-webkit-scrollbar-thumb:hover, .tg-tray::-webkit-scrollbar-thumb:hover { background-color: #000; }
-.panel::-webkit-scrollbar-thumb:active, .tg::-webkit-scrollbar-thumb:active, .dv-side::-webkit-scrollbar-thumb:active { background-color: var(--blue); }
+/* the slimmer bars (side panel, clock views, lists) — desktop only: a phone keeps its own thin overlay bar and the full width for content */
+body:not(.phone) :is(.panel, .tg, .dv-side, .dayview, .apal-stack, .tg-tray)::-webkit-scrollbar { width: 18px; height: 18px; }
+body:not(.phone) :is(.panel, .tg, .dv-side, .dayview, .apal-stack, .tg-tray)::-webkit-scrollbar-track { margin: 8px 0; border: solid transparent; border-width: 0 4px 0 2px; background: var(--olive) padding-box; border-radius: 9px; box-shadow: inset 0 0 0 1px var(--rule); }
+body:not(.phone) :is(.panel, .tg, .dv-side, .dayview, .apal-stack, .tg-tray)::-webkit-scrollbar-thumb { min-height: 48px; border: solid transparent; border-width: 4px 7px 4px 5px; border-radius: 9px; background-color: var(--rule); background-clip: padding-box; }
+body:not(.phone) :is(.panel, .tg, .dv-side, .dayview, .apal-stack, .tg-tray)::-webkit-scrollbar-thumb:hover { background-color: #000; }
+body:not(.phone) :is(.panel, .tg, .dv-side, .dayview, .apal-stack, .tg-tray)::-webkit-scrollbar-thumb:active { background-color: var(--blue); }
 .mhead { position: sticky; top: 0; z-index: 10; background: #fff; display: grid; grid-template-columns: 38px repeat(7, minmax(0, 1fr)); gap: 5px; padding: 8px 0 9px; }
 .dow { height: 40px; border: 1.5px solid var(--rule); border-radius: var(--radius); background: var(--olive); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 15px; letter-spacing: 0; color: var(--ink); box-shadow: 0 3px 0 var(--rule); text-transform: none; overflow: hidden; }
 .dow.wkd { background: var(--olive-2); }
@@ -351,6 +347,18 @@ b, strong { font-weight: 700; }
 .status-pill.q { border-color: var(--maroon); color: var(--maroon); font-weight: 700; }
 .status-pill.done { background: var(--olive); color: var(--ink); font-weight: 700; }
 .item.selected { outline: 2px solid var(--blue); outline-offset: 1px; }
+/* v59 — the task (or bill) he clicked opens where it sits: a blue frame and a SELECTED tab. Shape + wording, never color alone. */
+.item.opened { position: relative; border-width: 2px 2px 2px 5px; padding-top: 27px; }   /* every open card has the same frame and tab strip, so nothing shifts when the selection moves to another one */
+.item.picked { border-top-color: var(--blue); border-right-color: var(--blue); border-bottom-color: var(--blue); box-shadow: 3px 3px 0 rgba(42,74,138,.35); }
+.sec .row + .item.opened, .sec .nxbtn + .item.opened, .sec .trow + .item.opened, .sec .brow + .item.opened { margin-top: 7px; }   /* a card that opened among plain lines gets air above it */
+.item.opened.is-done { opacity: 1; }
+.pick-tag { position: absolute; top: 0; left: 0; background: var(--blue); color: #fff; font: 700 10px/1 var(--cond); letter-spacing: 1.4px; padding: 5px 10px 5px 8px; border-radius: 0 0 7px 0; pointer-events: none; }
+.pick-tag.quiet { background: #fff; color: var(--ink-2); padding: 4px 9px 4px 8px; border: solid var(--rule); border-width: 0 1px 1px 0; }   /* open, but not the one he clicked last */
+/* a card opened in the narrow overview panel (330 px): buttons two across, edit form one field per line — nothing cut off */
+body:not(.phone) .layout:not(.wide) .item .actions.r4, body:not(.phone) .layout:not(.wide) .item .actions.r3 { grid-template-columns: repeat(2, 1fr); }
+body:not(.phone) .layout:not(.wide) .item .form { grid-template-columns: 1fr; }
+/* the panel's title bar (date · Close) stays in reach while its list scrolls */
+.sec.head.stick { position: sticky; top: 0; z-index: 6; box-shadow: 0 -6px 0 2px #fff, 0 3px 0 rgba(0,0,0,.18); }   /* the white band hides the sliver of list that would show above it */
 
 /* ---------- edit form ---------- */
 .form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin-top: 8px; font-size: 13px; }

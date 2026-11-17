@@ -20,4 +20,5 @@ No build step. Push to `main` and it deploys.
 - `js/auth.js` — owner-only email login
 - `js/config.js` — public Supabase URL + publishable key (safe by design)
 - `sw.js`, `manifest.webmanifest` — installable app
+- `test/` — check-before-push suites (`python3 test/all.py`); made-up rows only, no database dump needed
 - `supabase/functions/ap-brain`, `supabase/functions/ap-meetings`, `supabase/functions/bills-ics` — edge functions

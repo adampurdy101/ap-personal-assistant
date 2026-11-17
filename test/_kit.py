@@ -27,9 +27,10 @@ def task(id, title, day, **kw):
     row.update(kw); return row
 
 def meeting(id, title, day, start="09:00", end="10:00", **kw):
-    """One fm_meetings row. Times are Pacific wall-clock for that day (PST, UTC-8 — the checks live in November)."""
+    """One fm_meetings row. Times are Pacific wall-clock for that day."""
+    off = "-07:00" if day < "2026-11-01" or "2027-03-14" <= day < "2027-11-07" else "-08:00"   # daylight time ends Nov 1, 2026
     row = {"id": id, "user_id": OWNER, "source": "pci_outlook", "ext_key": f"k-{id}", "title": title, "day": day,
-           "start_at": f"{day}T{start}:00-08:00", "end_at": f"{day}T{end}:00-08:00", "all_day": False, "attending": False,
+           "start_at": f"{day}T{start}:00{off}", "end_at": f"{day}T{end}:00{off}", "all_day": False, "attending": False,
            "hidden": False, "updated_at": "2026-11-01T16:00:00+00:00"}
     row.update(kw); return row
 
@@ -54,23 +55,26 @@ class Checks:
 
 class Site:
     """with Site(port) as s: page, errors = s.open(seed_dict, now=…)"""
-    def __init__(self, port): self.port = port
+    def __init__(self, port, scrollbars=False): self.port = port; self.scrollbars = scrollbars   # scrollbars=True draws them (Playwright hides them by default)
     def __enter__(self):
         build_site()
         self.server = subprocess.Popen([sys.executable, "-m", "http.server", str(self.port), "--bind", "127.0.0.1"], cwd=SITE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.8)
         self.pw = sync_playwright().start()
-        self.browser = self.pw.chromium.launch(executable_path=CHROME, headless=True, args=["--no-sandbox"])
+        self.browser = self.pw.chromium.launch(executable_path=CHROME, headless=True, args=["--no-sandbox"],
+                                               ignore_default_args=["--hide-scrollbars"] if self.scrollbars else None)
         return self
     def __exit__(self, *a):
         try: self.browser.close(); self.pw.stop()
         finally: self.server.terminate()
-    def open(self, seed_dict, now="2026-11-17T09:00:00-08:00", viewport=(1920, 1080), mobile=False, view=None, bucket="both", storage=None):
+    def open(self, seed_dict, now="2026-11-17T09:00:00-08:00", viewport=(1920, 1080), mobile=False, view=None, bucket="both", storage=None, init=None, query="", service_workers="allow"):
+        # service_workers="block": requests the page makes go straight out, so a check can answer them itself (Playwright cannot route a worker's fetches)
         ctx = self.browser.new_context(viewport={"width": viewport[0], "height": viewport[1]}, timezone_id="America/Los_Angeles", locale="en-US",
-                                       is_mobile=mobile, has_touch=mobile, device_scale_factor=1)
+                                       is_mobile=mobile, has_touch=mobile, device_scale_factor=1, service_workers=service_workers)
         extra = "".join(f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)}); " for k, v in (storage or {}).items())
         ctx.add_init_script("window.__SEED = " + json.dumps(seed_dict) + f"; try {{ if (!localStorage.getItem('fm.bucket')) localStorage.setItem('fm.bucket', '{bucket}'); "
                             + (f"if (!localStorage.getItem('fm.view')) localStorage.setItem('fm.view', '{view}'); " if view else "") + extra + "} catch (e) {}")
+        if init: ctx.add_init_script(init)   # extra page set-up a check needs before the app starts (a stubbed SpeechRecognition, …)
         for pat in ("**/fonts.googleapis.com/**", "**/fonts.gstatic.com/**", "**/s2/favicons**"): ctx.route(pat, lambda r: r.abort())
         ctx.route("**/functions/v1/ap-brain", lambda r: r.fulfill(status=200, content_type="application/json",
                   body=json.dumps({"reply": "Week is balanced. Moved nothing.", "actions": [], "batch_id": "fake-batch-1"})))
@@ -79,8 +83,9 @@ class Site:
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("console", lambda m: errors.append("console.error: " + m.text) if m.type == "error" and "ERR_FAILED" not in m.text else None)
-        page.goto(f"http://127.0.0.1:{self.port}/index.html", wait_until="load")
+        page.goto(f"http://127.0.0.1:{self.port}/index.html{query}", wait_until="load")
         page.wait_for_selector("#app:not(.hidden)")
+        if query: page.wait_for_timeout(600); return page, errors
         page.wait_for_selector(".pday" if mobile else ".tg" if view in ("week", "day") else ".mweek", state="attached", timeout=10000)
         page.wait_for_timeout(600)
         return page, errors

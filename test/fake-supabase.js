@@ -54,6 +54,9 @@ class Builder {
   async _run() {
     const t = this.table;
     if (!tables[t]) return { data: null, error: { message: "no such table " + t } };
+    // a check can make the next N reads / writes of a table fail: window.__FAKE.fail = { "fm_tasks:select": 1 }
+    const fk = t + ":" + this.op, fail = window.__FAKE.fail || {};
+    if (fail[fk] > 0) { fail[fk]--; return { data: null, error: { message: "simulated outage" } }; }
     if (this.op === "select") {
       reads[t] = (reads[t] || 0) + 1;
       const rows = this._rows().map((r) => ({ ...r }));

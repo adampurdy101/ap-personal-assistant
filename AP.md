@@ -113,8 +113,8 @@ and "why did this move" both have an answer. App batches are `app-<date>`.
   "↕ viewing October" note shows by the title while scrolled away.
 
 ## Click → Selected first · carry forward (v47, Nov 3 2026)
-- Clicking a chip opens the day panel with THAT task as the first card (blue "SELECTED" strip, expanded, panel
-  scrolled to the top); the rest of the day follows under "Also on this day". No hunting in the list.
+- (v47; replaced in v59, see "The side panel" below) Clicking a chip opened the day panel with THAT task as the
+  first card and the rest of the day under "Also on this day".
 - Carry forward: on every load, every open task sitting on a day before today moves to today (work → the next
   work day), `carried` goes up by one (↻N on the chip, "Carried ×N · was <day>" status) and `carried_from` keeps
   the day it was first due. Logged in `fm_moves` as `carry-<date>` moves. The update is guarded on the old
@@ -157,16 +157,34 @@ A day off is never a task either. Every read skips `deleted_at` rows. Model from
 `!!` or "urgent" · `!` or "high" · "low" · `#home` / `#work` · `@<job prefix>` ·
 "today" / "tomorrow" / "fri" / "10/30". Example: `Send James layout fri !! @miner`
 
+Word rules (v59, `parseQuick`), so a title is never eaten or mis-dated:
+- a day needs its real name or short form (`mon`, `monday`, `thu`, `thurs` …) — "Monthly report", "Wedge anchors" stay titles;
+- a board size is not a date: `1/2`, `1/4`, `3/4` and the eighths (`5/8 drywall`) stay in the title unless written
+  `on 5/8` / `by 5/8` / `due 5/8`; a number followed by `"` or `in` is never a date; `13/45` and `11/16/2026` are left alone;
+- `high` / `low` set the priority only as the last word (`call James high`) or as `high priority` — "low wall", "high bay" stay
+  titles; `urgent`, `!!` and `!` work anywhere.
+
 ## Shipping a change
 Bump `?v=N` on `css/app.css` and `js/app.js` in `index.html` and `VERSION` in `sw.js` together. GitHub Pages caches files for 10 minutes; the query string makes the browser fetch the new copy right away. Installed-app windows check for new code on wake and every 15 min and reload themselves.
 
-Check before push: `test/run_tests.py` copies the site, swaps `js/supabase.js` for the in-memory double
-(`test/fake-supabase.js`), seeds it from `test/seed.json` (your own rows: titles and dates only — keep it
-out of the repo, it is gitignored), drives headless Chrome through the real flows (done / remove / trash /
-undo / quick add / add panel / moves across weekends and PTO / drag / views / phone / bills: badge, hover summary,
-Paid ✓ + Undo, the Bills view, add a bill, phone Bills tab) and drops screenshots in `test/shots/`. The browser clock is
-pinned to `FIXED_NOW` (Playwright's clock API) and the few task rows the checks click on are pinned in `PINS`, so a
-fresh dump of the seed on any later day keeps the checks green. Needs `pip install playwright` and a Chrome binary.
+Check before push: `python3 test/all.py` runs every suite (about 6 minutes) and prints one line per suite. Each
+suite copies the site, swaps `js/supabase.js` for the in-memory double (`test/fake-supabase.js`), pins the browser
+clock (Playwright's clock API) and drives headless Chrome. **No dump from the database is needed any more** — the rows
+are made up (`test/synth_seed.py`, `test/_kit.py`); nothing personal is in the repo or in a test run.
+Needs `pip install playwright` and a Chrome binary (`CHROME=/path/to/chrome`).
+
+| Suite | Covers |
+|---|---|
+| `run_tests.py` | the main harness: load, month scroll, Done / Trash / Undo, Done log, quick add, moves across weekends and PTO, carry forward, Add panel, ? popover, edit form, drag, views, phone, bills, clock views, meetings, Day view (screenshots in `test/shots/`) |
+| `scroll_test.py` | live channel never loops · a redraw keeps the scroll place (inside and far outside the ±12-month window) · version stamps agree · no merge markers |
+| `panel_test.py` | the side panel: a task opens where it sits, SELECTED / OPEN tabs, scroll place kept, pinned title bar, bills, Done log, week list, phone · redraw only on change · hidden-window loading · midnight roll-over |
+| `misc_test.py` | quick-add word rules, Inbox, card buttons, Empty trash, Assistant (send / error + Retry / queue / Undo last), voice (stubbed SpeechRecognition), navigation, accounts + bill edit, failures (load / save / offline / new version), typing guard, drag onto a day off, phone |
+| `daysoff_test.py` | days off draw however far out they are |
+| `alerts_test.py` | sticky alerts |
+
+The double behaves like the real client where it matters: `removeChannel` reports `CLOSED` to that channel's own
+callback, `window.__FAKE.emit(table)` sends a live change, `.drop(status)` breaks the connection, `.fail = {"fm_tasks:select": 1}`
+makes the next read or write fail, `.reads` counts loads. `window.AP` exposes `draws`, `open`, `panel`, `voice`, `brain`, `parse()`.
 
 ## Sticky alerts (v55)
 - Every alert (`notify()` in js/app.js) goes on one list, `liveAlerts` (localStorage `fm.alerts.live`, today only), and shows in two places: the OS pop-up (`requireInteraction`, actions `snooze5` / `snooze15` — Chrome allows two) and the in-app card stack `#alert-stack` (`.apal-*` classes: Clear + Snooze 5 / 15 / 30).
@@ -192,9 +210,38 @@ fresh dump of the seed on any later day keeps the checks green. Needs `pip insta
 - Harness: `test/run_tests.py` T15–T17 (week 1/2/3, drag, set time, pencil + lock, remove/undo/put back, day view) run in the
   Nov 12 world (`RAW` seed, `NOW2`); shots 20–30.
 
+## Live data, redraws and the side panel (v57 – v59, Nov 17 2026)
+- **Live channel (v57).** `subscribe()` replaces the channel; supabase-js reports `CLOSED` to the OLD channel's callback when
+  it is removed. That callback used to schedule another `subscribe()` — an endless reconnect + full reload + redraw every 3 s
+  after the first Refresh press or network blip. A replaced channel is now ignored (`ch !== liveChannel`), there is one retry
+  timer, and retries back off 3 s → 60 s.
+- **Month window (v57).** `renderMonth` builds ±12 months around the focus month and always stretches to the week on screen
+  (`state.mTop`), so a redraw never lands back on the focus month. ‹ › glide from the week on screen (`state.mPrev`, v59) —
+  the old pixel offset pointed at another week once the window was rebuilt.
+- **Scroll bars (v58).** One look: olive channel, charcoal hairline (inset box-shadow), charcoal grab bar kept clear of the
+  channel's lines by transparent borders + `background-clip: padding-box`. Do not set `scrollbar-color` / `scrollbar-width`
+  (Chrome would drop the custom look).
+- **One load at a time, redraw only on change (v59).** `loadAll()` is single-flight (`loadOnce()` + one shared follow-up
+  pass). The fetched rows are compared with what the screen was drawn from (`dataSig`); identical data = no redraw, and the
+  task / meeting objects on screen stay the same objects. `timeKey()` forces a redraw when the date changes (month view) or
+  the minute changes (clock views, phone). `tickClock()` moves the Today card's clock without a redraw.
+  `loadAll({ force: true })` is for callers whose change lives outside the data (Assistant reply, Refresh button).
+  `patchTask` also patches the live row by id, so a button or popover drawn before a reload never edits a stale copy.
+- **Hidden window (v59).** A minimized / background window keeps loading (at most once a minute; the 30 s poll drops to
+  5 min) so the alerts know about meetings and tasks added while it was out of sight.
+- **The side panel (v59).** `keepRail()` wraps every panel draw: same screen (`railKey()`) → the scroll place is kept and the
+  clicked row / card is pinned to its spot (`pinHere`, `data-at`); new screen → top. Cards open by key (`state.open`:
+  `card:<id>` in a day / inbox list, `<list>:<id>` for a row that opens in place on the overview, Coming up, Promises, Done log,
+  week Task list). Opening one never closes another (a card closing above would move the one just clicked); the last one
+  opened is `.picked` (blue frame, `▸ SELECTED` tab), the others `.opened` (`OPEN` tab) — same frame, so nothing shifts.
+  `state.openId` is kept as a get/set handle for older code (get = selected task, set = "only this one" / none).
+  From the calendar (`openDay(d, id)`) the card is brought into view (`showPicked`, "jump"); in the panel it only glides
+  enough to show its buttons ("nudge"). Done, a move, Esc and leaving the screen close cards. Bills follow the same rule
+  (`state.billOpenAt`). Panel title bars are `position: sticky`.
+
 ## Stages
 1. Calendar, panel, quick add + mic, Add task, brain, undo — done
 2. Scheduled runs (morning, end of day) — done
 3. Meetings on the calendar (Outlook feed direct, every 15 min) — done · days off — done
-4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Day-off look — done (v53: gold square + round seal in month, week, date picker and phone views; past days keep the olive X; ap-brain source wording updated, not yet redeployed, so the deployed brain still says "hatched"). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Clock views — done (v54: week hour grid with Tray / Task list / Auto-fit, day grid + list, task times, meeting Remove + Hidden meetings). Sticky alerts — done (v55: stay until Clear or Snooze 5 / 15 / 30, chime every 2 min). Still to do: the Assistant setting a time by voice (ap-brain `start_time`); dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint options
+4. Look v2 — done. Done/Trash/Undo + Done log — done (v46). Bills in AP, old bill calendar retired — done (v49). Days off by voice — done (v51). Day-off look — done (v53: gold square + round seal in month, week, date picker and phone views; past days keep the olive X; ap-brain source wording updated, not yet redeployed, so the deployed brain still says "hatched"). Refresh button — done (v52: top bar, reloads every table, reconnects the live channel, compares the server version with the one on screen and reloads if newer; stamp shows the last pull time). Clock views — done (v54: week hour grid with Tray / Task list / Auto-fit, day grid + list, task times, meeting Remove + Hidden meetings). Sticky alerts — done (v55: stay until Clear or Snooze 5 / 15 / 30, chime every 2 min). Days off with no end date — done (v56). Reconnect loop + scroll place — fixed (v57). Scroll bars redrawn — done (v58). Side panel opens tasks in place, redraw only on change, quick-add word rules, seed-free test suites — done (v59). Still to do: the Assistant setting a time by voice (ap-brain `start_time`); dated tasks → Google Calendar alerts; Jobs tab with timeline bars; Gmail asks → unscheduled; hourly nudge; background tint options
 5. Phone-first polish
